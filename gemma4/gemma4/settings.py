@@ -11,6 +11,8 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
 from pathlib import Path
+import os
+import fireo
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -21,6 +23,17 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = 'django-insecure-=is7n7h=&j@%$sldq1vf)xd^u(4pu&n#gmf)4rc6i2o$qqj-c2'
+
+# ============================================================================
+# Firebase Configuration
+# ============================================================================
+FIREBASE_KEY_PATH = os.path.join(BASE_DIR, 'gemma4-8e8c0-firebase-adminsdk-fbsvc-676ecee5a5.json')
+
+# Initialize FireO connection to Firebase
+try:
+    fireo.connection(from_file=FIREBASE_KEY_PATH)
+except Exception as e:
+    print(f"Warning: Firebase connection failed - {e}")
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
@@ -38,6 +51,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'info',
+    'users',
 ]
 
 MIDDLEWARE = [
@@ -73,10 +87,10 @@ WSGI_APPLICATION = 'gemma4.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
+
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.dummy',
     }
 }
 

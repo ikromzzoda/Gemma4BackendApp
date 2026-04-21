@@ -1,8 +1,4 @@
-# Python artifacts
-__pycache__/
-*.py[cod]
-*$py.class
-.python-version
+gemma4-8e8c0-firebase-adminsdk-fbsvc-676ecee5a5.json
 
 # Virtual environments
 env/
@@ -10,6 +6,13 @@ venv/
 ENV/
 .venv/
 .env/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+
 
 # Django
 *.log
