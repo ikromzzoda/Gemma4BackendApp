@@ -52,7 +52,17 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'info',
     'users',
+    'django_celery_beat',
 ]
+
+# Redis как брокер
+CELERY_BROKER_URL = 'redis://localhost:6379/0'
+CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
+
+# Координаты и ключ для автозапроса
+AUTO_FETCH_LAT = 41.2995
+AUTO_FETCH_LON = 69.2401
+OPENWEATHER_API_KEY = 'your_api_key_here'  # лучше через .env
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
