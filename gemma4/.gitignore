@@ -1,0 +1,72 @@
+# Secrets & credentials
+gemma4-8e8c0-firebase-adminsdk-fbsvc-676ecee5a5.json
+*.pem
+*.key
+*.crt
+
+# Environment files
+.env
+.env.*
+.env.local
+
+# Virtual environments
+.env/
+.venv/
+env/
+venv/
+ENV/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.python-version
+
+# Django
+*.log
+*.pot
+*.sqlite3
+*.sqlite3-journal
+media/
+staticfiles/
+local_settings.py
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# IDEs & editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*~
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Celery beat scheduler
+celerybeat-schedule
+celerybeat-schedule.dat
+celerybeat-schedule.dir
+
+# Temporary files
+*.bak
+*.tmp

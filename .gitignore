@@ -1,0 +1,13 @@
+# Virtual environment
+.env/
+.venv/
+env/
+venv/
+
+# Environment files
+.env.local
+.env
+.env.*
+
+# Claude Code
+.claude/
