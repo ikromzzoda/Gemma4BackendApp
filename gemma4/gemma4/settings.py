@@ -58,6 +58,7 @@ INSTALLED_APPS = [
     'weather',
     'users',
     'django_celery_beat',
+    'chat',
 ]
 
 # Redis как брокер
