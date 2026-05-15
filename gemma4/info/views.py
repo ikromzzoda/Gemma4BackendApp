@@ -8,6 +8,7 @@ from .models import AirPollution
 import os
 from dotenv import load_dotenv
 from pathlib import Path
+import json
 
 env_path = Path(__file__).resolve().parent.parent.parent / '.env.local'
 load_dotenv(dotenv_path=env_path)
@@ -52,27 +53,6 @@ def _validate_city(city):
             "valid_cities": list(TAJIK_CITIES.keys()),
         }, status=400)
     return TAJIK_CITIES[city], None
-
-
-def generate_advice(aqi, health_condition, activity_level):
-    prompt = (
-        f"You are an air quality health advisor. Give short, practical health advice in 2-3 sentences.\n\n"
-        f"AQI: {aqi} ({_aqi_label(aqi)})\n"
-        f"Health condition: {health_condition}\n"
-        f"Activity level: {activity_level}\n\n"
-        f"Advise on outdoor activities and necessary health precautions. Be concise and direct."
-    )
-
-    try:
-        response = requests.post(
-            f"{settings.OLLAMA_URL}/api/generate",
-            json={"model": settings.OLLAMA_MODEL, "prompt": prompt, "stream": False},
-            timeout=30,
-        )
-        response.raise_for_status()
-        return response.json().get("response", "").strip()
-    except Exception:
-        return f"AQI is {aqi} ({_aqi_label(aqi)}). Please check local air quality guidelines for your health condition and activity level."
 
 
 # ─── existing helper (used by Celery task) ────────────────────────────────────
@@ -375,7 +355,7 @@ def get_ai_advice(request):
         return JsonResponse({"status": "error", "error": "OpenWeatherMap API unavailable"}, status=503)
 
     try:
-        aqi = resp.json()["list"][0]["main"]["aqi"]
+        aqi = resp.json()["list"][0]["main"]["aqi"] * 10
         return JsonResponse({
             "status": "success",
             "data": {
@@ -389,3 +369,83 @@ def get_ai_advice(request):
         })
     except Exception as e:
         return JsonResponse({"status": "error", "error": "Internal server error", "detail": str(e)}, status=500)
+
+
+import logging
+logger = logging.getLogger(__name__)
+
+import re
+
+def _extract_json(raw: str) -> dict:
+    """Извлекает первый валидный JSON объект из текста любой длины."""
+    
+    # 1. Пробуем напрямую
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Убираем ```json ... ``` обёртки
+    code_block = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
+    if code_block:
+        try:
+            return json.loads(code_block.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # 3. Берём ПОСЛЕДНИЙ {...} в тексте (модель пишет JSON в конце)
+    matches = list(re.finditer(r"\{[^{}]*\}", raw, re.DOTALL))
+    for match in reversed(matches):  # с конца — там финальный JSON
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            continue
+
+    raise ValueError("No valid JSON found in response")
+
+
+def generate_advice(aqi, health_condition, activity_level):
+    prompt = (
+        f"You are an air quality health advisor.\n"
+        f"AQI: {aqi*10} ({_aqi_label(aqi*10)})\n"
+        f"Health condition: {health_condition}\n"
+        f"Activity level: {activity_level}\n\n"
+        f"Return ONLY this JSON, nothing else:\n"
+        f'{{"advice": ["tip 1", "tip 2", "tip 3"]}}\n'
+        f"Each tip: 1 short sentence. Max 3 tips."
+    )
+
+    raw = ""
+    try:
+        response = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{settings.GEMMA4_MODEL}:generateContent",
+            params={"key": settings.GEMMA4_API_KEY},
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "maxOutputTokens": 200,
+                    "temperature": 0.2,  # ниже = меньше "мыслей"
+                }
+            },
+            timeout=(10, 60),
+        )
+        response.raise_for_status()
+
+        raw = response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        logger.debug(f"[AI] raw={raw!r}")
+
+        parsed = _extract_json(raw)
+        tips = parsed.get("advice", [])
+
+        if isinstance(tips, list) and tips:
+            return [str(t) for t in tips[:3]]
+        return [str(tips)]
+
+    except requests.exceptions.ReadTimeout:
+        logger.error("generate_advice: TIMEOUT")
+    except ValueError as e:
+        logger.error(f"generate_advice: {e} | raw={raw[:200]!r}")
+    except Exception as e:
+        logger.error(f"generate_advice: {type(e).__name__}: {e}")
+
+    return [f"Air quality is {_aqi_label(aqi)}. Check local guidelines for your health condition."]

@@ -13,6 +13,9 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 from pathlib import Path
 import os
 import fireo
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / '.env')
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -38,7 +41,7 @@ except Exception as e:
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['192.168.0.118', 'localhost', '127.0.0.1']
 
 
 # Application definition
@@ -145,5 +148,5 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 
-OLLAMA_URL = os.getenv('OLLAMA_URL', 'http://localhost:11434')
-OLLAMA_MODEL = os.getenv('OLLAMA_MODEL', 'gemma4')
+GEMMA4_API_KEY = os.getenv('GEMMA4_API_KEY', '')
+GEMMA4_MODEL = os.getenv('GEMMA4_MODEL', 'gemma-4-26b-a4b-it')
