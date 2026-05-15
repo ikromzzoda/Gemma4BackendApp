@@ -331,6 +331,206 @@ If all 9 cities fail, all 9 entries will have `"error": "Data unavailable"` but 
 
 ---
 
+---
+
+## 11. POST /api/chat/sessions/create/
+
+### Scenario 1 — OpenWeatherMap unavailable
+**Not applicable.** This endpoint makes no external API calls.
+
+### Scenario 2 — Firestore unavailable
+
+`session.save()` raises an exception → caught by `except Exception as e`.
+
+**HTTP 500**
+```json
+{
+  "status": "error",
+  "error": "<Firestore exception message>"
+}
+```
+Endpoint **fails completely**. No session is created.
+
+### Scenario 3 — Gemma4 API unavailable
+**Not applicable.** This endpoint does not call the AI API.
+
+---
+
+## 12. GET /api/chat/users/\<user_uid\>/sessions/
+
+### Scenario 1 — OpenWeatherMap unavailable
+**Not applicable.**
+
+### Scenario 2 — Firestore unavailable
+
+`ChatSession.collection.filter("user_uid", "==", user_uid).fetch()` raises → caught by `except Exception as e`.
+
+**HTTP 500**
+```json
+{
+  "status": "error",
+  "error": "<Firestore exception message>"
+}
+```
+Endpoint **fails completely**.
+
+### Scenario 3 — Gemma4 API unavailable
+**Not applicable.**
+
+---
+
+## 13. GET /api/chat/sessions/\<session_id\>/messages/
+
+### Scenario 1 — OpenWeatherMap unavailable
+**Not applicable.**
+
+### Scenario 2 — Firestore unavailable
+
+`Message.collection.filter("chat_id", "==", session_id).fetch()` raises → caught by `except Exception as e`.
+
+**HTTP 500**
+```json
+{
+  "status": "error",
+  "error": "<Firestore exception message>"
+}
+```
+Endpoint **fails completely**.
+
+### Scenario 3 — Gemma4 API unavailable
+**Not applicable.**
+
+---
+
+## 14. POST /api/chat/sessions/\<session_id\>/message/
+
+This is the most complex endpoint. Failure can occur at three separate stages.
+
+### Scenario 1 — OpenWeatherMap unavailable
+**Not applicable.** This endpoint makes no OWM calls.
+
+### Scenario 2 — Firestore unavailable
+
+**Stage A — session lookup fails:**  
+`ChatSession.collection.get(session_id)` raises → caught by bare `except Exception`, `session` is set to `None`.
+
+**HTTP 404**
+```json
+{
+  "status": "error",
+  "error": "Session not found"
+}
+```
+
+**Stage B — message history load fails:**  
+`Message.collection.filter("chat_id", "==", session_id).fetch()` raises → caught by `except Exception`, `history` falls back to `[]`. The endpoint **continues** with empty history. The AI reply is still generated and both messages are saved.
+
+**Stage C — saving user or AI message fails:**  
+`user_msg.save()` or `ai_msg.save()` raises → **not caught at message level**. The exception propagates to the outer `try` block in `send_message`. Because there is no outer try/except wrapping the save operations, this would cause an **unhandled 500**.
+
+> **Note:** `session.update()` failure at the end is caught by its own `except Exception` and only logs a warning — the `200` response is still returned.
+
+### Scenario 3 — Gemma4 API unavailable
+
+`requests.post(...)` raises any exception → caught by `except Exception as e` inside `_call_gemma()`.
+
+A **retry** is attempted without the `systemInstruction` field. If the retry also fails → caught by the inner `except Exception as e2`.
+
+**The endpoint returns HTTP 200** with a fallback reply:
+
+```json
+{
+  "status": "success",
+  "data": {
+    "user_message": { "...user message object..." },
+    "ai_message": {
+      "id": "chat_messages/...",
+      "chat_id": "chat_sessions/...",
+      "role": "assistant",
+      "content": "Sorry, I couldn't process your request right now. Please try again.",
+      "created_at": "2026-05-16 09:01:03+05:00"
+    },
+    "session_title": "..."
+  }
+}
+```
+
+**On read timeout specifically** (>60 s, `requests.exceptions.ReadTimeout`):
+
+```json
+{
+  "ai_message": {
+    "content": "Sorry, I'm taking too long to respond. Please try again."
+  }
+}
+```
+
+The user message **is always saved** to Firestore before the AI call. The fallback response **is also saved** as an `"assistant"` message. The frontend **cannot distinguish** fallback from real AI output — there is no `"is_fallback"` flag.
+
+---
+
+## 15. DELETE /api/chat/sessions/\<session_id\>/delete/
+
+### Scenario 1 — OpenWeatherMap unavailable
+**Not applicable.**
+
+### Scenario 2 — Firestore unavailable
+
+**Stage A — session lookup fails:**  
+`ChatSession.collection.get(session_id)` raises → caught by bare `except Exception`, `session` set to `None`.
+
+**HTTP 404**
+```json
+{
+  "status": "error",
+  "error": "Session not found"
+}
+```
+
+**Stage B — delete loop fails:**  
+`Message.collection.filter(...).fetch()` or any `msg.delete()` or `session.delete()` raises → caught by `except Exception as e`.
+
+**HTTP 500**
+```json
+{
+  "status": "error",
+  "error": "<Firestore exception message>"
+}
+```
+The session and/or some messages may have been partially deleted before the error.
+
+### Scenario 3 — Gemma4 API unavailable
+**Not applicable.**
+
+---
+
+## 16. PATCH /api/chat/sessions/\<session_id\>/title/
+
+### Scenario 1 — OpenWeatherMap unavailable
+**Not applicable.**
+
+### Scenario 2 — Firestore unavailable
+
+**Stage A — session lookup fails:**  
+Same pattern as other endpoints — `session` set to `None` → **HTTP 404**.
+
+**Stage B — update fails:**  
+`session.update()` raises → caught by `except Exception as e`.
+
+**HTTP 500**
+```json
+{
+  "status": "error",
+  "error": "<Firestore exception message>"
+}
+```
+Endpoint **fails completely**.
+
+### Scenario 3 — Gemma4 API unavailable
+**Not applicable.**
+
+---
+
 ## Summary Table
 
 | Endpoint | Scenario | HTTP Status | Behavior |
@@ -356,6 +556,21 @@ If all 9 cities fail, all 9 entries will have `"error": "Data unavailable"` but 
 | `GET /api/home/` | Firestore unavailable | **500** | Fails completely (API data lost) |
 | `GET /api/map/` | OWM unavailable | **200** | Partial data — failing cities get `"error": "Data unavailable"` |
 | `GET /api/map/` | Firestore unavailable | — | **Not affected** |
+| `POST /api/chat/sessions/create/` | OWM unavailable | — | Not affected |
+| `POST /api/chat/sessions/create/` | Firestore unavailable | **500** | Fails completely |
+| `GET /api/chat/users/<uid>/sessions/` | OWM unavailable | — | Not affected |
+| `GET /api/chat/users/<uid>/sessions/` | Firestore unavailable | **500** | Fails completely |
+| `GET /api/chat/sessions/<id>/messages/` | OWM unavailable | — | Not affected |
+| `GET /api/chat/sessions/<id>/messages/` | Firestore unavailable | **500** | Fails completely |
+| `POST /api/chat/sessions/<id>/message/` | OWM unavailable | — | Not affected |
+| `POST /api/chat/sessions/<id>/message/` | Firestore unavailable (lookup) | **404** | Session appears not found |
+| `POST /api/chat/sessions/<id>/message/` | Firestore unavailable (history) | **200** | Continues with empty history |
+| `POST /api/chat/sessions/<id>/message/` | Gemma4 API unavailable | **200** | Returns fallback reply string |
+| `DELETE /api/chat/sessions/<id>/delete/` | OWM unavailable | — | Not affected |
+| `DELETE /api/chat/sessions/<id>/delete/` | Firestore unavailable (lookup) | **404** | Session appears not found |
+| `DELETE /api/chat/sessions/<id>/delete/` | Firestore unavailable (delete) | **500** | Partial delete possible |
+| `PATCH /api/chat/sessions/<id>/title/` | OWM unavailable | — | Not affected |
+| `PATCH /api/chat/sessions/<id>/title/` | Firestore unavailable | **500** | Fails completely |
 
 ---
 
@@ -372,3 +587,11 @@ If all 9 cities fail, all 9 entries will have `"error": "Data unavailable"` but 
 5. **`/api/home/` loses API data when Firestore fails** — the OWM data is fetched successfully but the DB write attempt crashes before the response is sent. The frontend gets a 500 instead of the weather data.
 
 6. **`/api/air-pollution/` and `/api/air-pollution/location/` have the same problem** — if Firestore fails during the cache check, the already-fetched API data is lost and the frontend gets 500.
+
+7. **`POST /api/chat/sessions/<id>/message/` gracefully handles Gemma4 failure** — the endpoint always returns `200`. On any AI API error (including timeout), a human-readable fallback string is saved as the assistant message. There is no `"is_fallback"` flag.
+
+8. **History-load failure in `/api/chat/sessions/<id>/message/` is silent** — if Firestore fails when loading conversation history, the endpoint continues with an empty history. The AI reply will lack context but the user won't see an error.
+
+9. **`DELETE /api/chat/sessions/<id>/delete/` can leave orphan messages** — if Firestore fails mid-loop, some messages may be deleted while others remain. There is no transaction or rollback.
+
+10. **All chat endpoints use `"status": "error"` in error responses** — consistent with the users, forecast, advice, home, and map endpoints, unlike the air-pollution group.

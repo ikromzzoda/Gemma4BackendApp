@@ -1,7 +1,7 @@
 # API Documentation
 
 **Base URL:** `/api/`  
-**Stack:** Django · Firebase Firestore · OpenWeatherMap · Ollama (local LLM)  
+**Stack:** Django · Firebase Firestore · OpenWeatherMap · Ollama (local LLM) · Gemma4 API (Google Generative Language)  
 **Format:** All requests and responses use `application/json`
 
 ---
@@ -592,6 +592,270 @@ Individual city failures are isolated — a single city's API error does not abo
 ```
 
 The response is always `200 OK` even if all cities fail individually.
+
+---
+
+---
+
+## Chat Endpoints
+
+The chat module provides a multi-turn AI conversation feature powered by the **Gemma4 API** (Google Generative Language). The AI persona is named **Airi** — a helpful assistant specialised in air quality, health impacts of pollution, weather patterns, and personalised health recommendations.
+
+**Firestore collections used:**
+- `chat_sessions` — session metadata (title, owner, timestamps)
+- `chat_messages` — individual messages with roles `"user"` / `"assistant"`
+
+---
+
+### 11. POST /api/chat/sessions/create/
+
+Creates a new chat session for a user.
+
+**CSRF:** Exempt (class-based view routing, no decorator needed)
+
+#### Request Body
+
+| Field | Type | Required | Default | Notes |
+|-------|------|----------|---------|-------|
+| `user_uid` | string | **Yes** | — | Firebase Auth UID of the session owner |
+| `title` | string | No | `"New Chat"` | Session display name. Auto-generated from the first message if this default is kept. |
+
+**Example request:**
+```json
+{
+  "user_uid": "firebase_uid_abc123",
+  "title": "My air quality questions"
+}
+```
+
+#### Success Response — `201 Created`
+
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "chat_sessions/AbCdEfGhIj",
+    "user_uid": "firebase_uid_abc123",
+    "title": "My air quality questions",
+    "created_at": "2026-05-16 09:00:00+05:00",
+    "updated_at": null
+  }
+}
+```
+
+> `id` is the Firestore document path returned by Fireo (e.g. `"chat_sessions/AbCdEfGhIj"`).
+
+---
+
+### 12. GET /api/chat/users/\<user_uid\>/sessions/
+
+Returns all chat sessions owned by a user, sorted newest-first by `created_at`.
+
+#### URL Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `user_uid` | string | **Yes** | Firebase Auth UID |
+
+#### Success Response — `200 OK`
+
+```json
+{
+  "status": "success",
+  "data": [
+    {
+      "id": "chat_sessions/AbCdEfGhIj",
+      "user_uid": "firebase_uid_abc123",
+      "title": "Why is AQI high today?",
+      "created_at": "2026-05-16 09:00:00+05:00",
+      "updated_at": "2026-05-16 09:05:00+05:00"
+    },
+    {
+      "id": "chat_sessions/XyZwVuTsRq",
+      "user_uid": "firebase_uid_abc123",
+      "title": "New Chat",
+      "created_at": "2026-05-15 14:30:00+05:00",
+      "updated_at": null
+    }
+  ]
+}
+```
+
+Returns an empty array `[]` inside `"data"` if the user has no sessions.
+
+---
+
+### 13. GET /api/chat/sessions/\<session_id\>/messages/
+
+Returns all messages in a session, sorted oldest-first by `created_at`.
+
+#### URL Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_id` | string | **Yes** | Firestore document ID of the session |
+
+#### Success Response — `200 OK`
+
+```json
+{
+  "status": "success",
+  "data": [
+    {
+      "id": "chat_messages/Msg001",
+      "chat_id": "chat_sessions/AbCdEfGhIj",
+      "role": "user",
+      "content": "What does AQI 3 mean for someone with asthma?",
+      "created_at": "2026-05-16 09:01:00+05:00"
+    },
+    {
+      "id": "chat_messages/Msg002",
+      "chat_id": "chat_sessions/AbCdEfGhIj",
+      "role": "assistant",
+      "content": "AQI 3 is Moderate. For asthma sufferers, prolonged outdoor exertion is not advised...",
+      "created_at": "2026-05-16 09:01:03+05:00"
+    }
+  ]
+}
+```
+
+**`role` values:** `"user"` | `"assistant"`
+
+---
+
+### 14. POST /api/chat/sessions/\<session_id\>/message/
+
+Sends a user message, fetches an AI reply from Gemma4, saves both to Firestore, and returns both in the same response.
+
+**AI behaviour:**
+- Full conversation history is loaded and sent to Gemma4 as multi-turn context.
+- System prompt instructs the model to act as **Airi** (air quality assistant).
+- If `systemInstruction` is rejected by the model, the request is automatically retried without it.
+- On timeout (>60 s) or any other error, a safe fallback reply is returned — the endpoint always returns `200`.
+- If the session title is still `"New Chat"` and this is the first message, the title is auto-set to the first 60 characters of the user's message.
+
+#### URL Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_id` | string | **Yes** | Firestore document ID of the session |
+
+#### Request Body
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `message` | string | **Yes** | The user's message text (whitespace-only counts as empty) |
+
+**Example request:**
+```json
+{
+  "message": "What does AQI 3 mean for someone with asthma?"
+}
+```
+
+#### Success Response — `200 OK`
+
+```json
+{
+  "status": "success",
+  "data": {
+    "user_message": {
+      "id": "chat_messages/Msg001",
+      "chat_id": "chat_sessions/AbCdEfGhIj",
+      "role": "user",
+      "content": "What does AQI 3 mean for someone with asthma?",
+      "created_at": "2026-05-16 09:01:00+05:00"
+    },
+    "ai_message": {
+      "id": "chat_messages/Msg002",
+      "chat_id": "chat_sessions/AbCdEfGhIj",
+      "role": "assistant",
+      "content": "AQI 3 is Moderate. For asthma sufferers, prolonged outdoor exertion is not advised...",
+      "created_at": "2026-05-16 09:01:03+05:00"
+    },
+    "session_title": "What does AQI 3 mean for s..."
+  }
+}
+```
+
+**`session_title`** reflects the (possibly just-updated) title after this call.
+
+**Fallback `ai_message.content` when Gemma4 is unreachable:**
+```
+"Sorry, I couldn't process your request right now. Please try again."
+```
+
+**Fallback on read timeout (>60 s):**
+```
+"Sorry, I'm taking too long to respond. Please try again."
+```
+
+Both fallbacks still return `HTTP 200` and the same JSON shape. There is no `"is_fallback"` flag.
+
+---
+
+### 15. DELETE /api/chat/sessions/\<session_id\>/delete/
+
+Deletes a chat session and **all messages** that belong to it.
+
+#### URL Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_id` | string | **Yes** | Firestore document ID of the session |
+
+#### Success Response — `200 OK`
+
+```json
+{
+  "status": "success",
+  "message": "Session deleted"
+}
+```
+
+> This is a hard delete — messages are deleted individually before the session document is removed. There is no recovery.
+
+---
+
+### 16. PATCH /api/chat/sessions/\<session_id\>/title/
+
+Renames a chat session.
+
+#### URL Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_id` | string | **Yes** | Firestore document ID of the session |
+
+#### Request Body
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `title` | string | **Yes** | New title. Whitespace-only counts as empty and is rejected. |
+
+**Example request:**
+```json
+{
+  "title": "PM2.5 health questions"
+}
+```
+
+#### Success Response — `200 OK`
+
+Returns the updated session object:
+
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "chat_sessions/AbCdEfGhIj",
+    "user_uid": "firebase_uid_abc123",
+    "title": "PM2.5 health questions",
+    "created_at": "2026-05-16 09:00:00+05:00",
+    "updated_at": "2026-05-16 09:10:00+05:00"
+  }
+}
+```
 
 ---
 
