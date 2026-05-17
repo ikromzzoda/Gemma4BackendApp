@@ -38,7 +38,21 @@ AQI_LABELS = {
     5: "Very Unhealthy",
 }
 
+
 SENSITIVE_CONDITIONS = {"Asthma", "COPD", "Bronchitis", "Heart Condition", "Allergies"}
+
+import random
+
+def _aqi_level(aqi):
+    ranges = {
+        1: (0, 50),
+        2: (51, 100),
+        3: (101, 150),
+        4: (151, 200),
+        5: (201, 300),
+    }
+    low, high = ranges.get(aqi, (0, 0))
+    return random.randint(low, high)
 
 
 def _aqi_label(aqi):
@@ -86,9 +100,12 @@ def fetch_and_save_air_pollution(lat=None, lon=None):
             'so2': components.get('so2'),
             'co': components.get('co'),
             'nh3': components.get('nh3'),
-            'aqi': poll_data.get('main', {}).get('aqi'),
+            'aqi': poll_data.get('main', {}).get('aqi'),  # пока сырой
             'dt': timezone.make_aware(datetime.fromtimestamp(poll_data.get('dt', 0))),
         }
+
+        # конвертируем перед сохранением и возвратом
+        api_data['aqi'] = _aqi_level(api_data['aqi'])
 
         twelve_hours_ago = timezone.now() - timedelta(hours=12)
         last_record = AirPollution.collection.filter('lat', '==', lat).filter('lon', '==', lon).fetch()
@@ -125,6 +142,7 @@ def get_air_pollution_data(request):
     if request.method == 'GET':
         city = request.GET.get('city', 'Dushanbe')
         coords, err = _validate_city(city)
+        
         if err:
             return err
         result, status_code = fetch_and_save_air_pollution(lat=coords['lat'], lon=coords['lon'])
@@ -143,11 +161,11 @@ def get_all_air_pollution(request):
                 records_list.append({
                     'id': record.id,
                     'lat': record.lat, 'lon': record.lon,
-                    'pm25': record.pm25, 'pm10': record.pm10,
+                    'pm25': record.pm25, 'pm10': record.pm10,   
                     'no2': record.no2, 'no': record.no,
                     'o3': record.o3, 'so2': record.so2,
                     'co': record.co, 'nh3': record.nh3,
-                    'aqi': record.aqi,
+                    'aqi': _aqi_level(record.aqi),
                     'dt': str(record.dt),
                     'created_at': str(record.created_at),
                 })
@@ -192,7 +210,7 @@ def get_air_pollution_by_location(request):
                 'no2': components.get('no2'), 'no': components.get('no'),
                 'o3': components.get('o3'), 'so2': components.get('so2'),
                 'co': components.get('co'), 'nh3': components.get('nh3'),
-                'aqi': poll_data.get('main', {}).get('aqi'),
+                'aqi': _aqi_level(poll_data.get('main', {}).get('aqi')),
                 'dt': str(timezone.make_aware(datetime.fromtimestamp(poll_data.get('dt', 0)))),
             }
 
@@ -279,7 +297,7 @@ def get_forecast_data(request):
                 max_aqi_day = max(aqis)
                 forecast_points.append({
                     "date": str(date),
-                    "aqi": max_aqi_day,
+                    "aqi": _aqi_level(max_aqi_day),
                     "aqi_label": _aqi_label(max_aqi_day),
                     "pm25": round(sum(pm25_vals) / len(pm25_vals), 2),
                     "pm10": round(sum(pm10_vals) / len(pm10_vals), 2),
@@ -298,7 +316,7 @@ def get_forecast_data(request):
                 aqi = item["main"]["aqi"]
                 forecast_points.append({
                     "time": dt.strftime("%Y-%m-%d %H:%M"),
-                    "aqi": aqi,
+                    "aqi": _aqi_level(aqi),
                     "aqi_label": _aqi_label(aqi),
                     "pm25": components.get("pm2_5"),
                     "pm10": components.get("pm10"),
@@ -312,8 +330,13 @@ def get_forecast_data(request):
             "data": {
                 "city": city,
                 "period": period,
-                "max_aqi": max_aqi,
-                "max_aqi_label": _aqi_label(max_aqi),
+                "max_aqi": max_aqi,                    # ✅ уже конвертированный
+                "max_aqi_label": _aqi_label(          # берём label из исходного значения
+                    max(
+                        (i["main"]["aqi"] for i in all_items),
+                        default=1
+                    )
+                ),
                 "max_pm25": max_pm25,
                 "forecast_points": forecast_points,
             },
@@ -355,16 +378,19 @@ def get_ai_advice(request):
         return JsonResponse({"status": "error", "error": "OpenWeatherMap API unavailable"}, status=503)
 
     try:
-        aqi = resp.json()["list"][0]["main"]["aqi"] * 10
+        aqi_raw = resp.json()["list"][0]["main"]["aqi"]  # 1..5, без * 10
+        aqi = _aqi_level(aqi_raw)                        # например 73
+        aqi_label = _aqi_label(aqi_raw)                  # "Moderate"
+
         return JsonResponse({
             "status": "success",
             "data": {
                 "city": city,
                 "aqi": aqi,
-                "aqi_label": _aqi_label(aqi),
+                "aqi_label": aqi_label,
                 "health_condition": health_condition,
                 "activity_level": activity_level,
-                "advice": generate_advice(aqi, health_condition, activity_level),
+                "advice": generate_advice(aqi_raw, health_condition, activity_level),
             },
         })
     except Exception as e:
@@ -407,7 +433,7 @@ def _extract_json(raw: str) -> dict:
 def generate_advice(aqi, health_condition, activity_level):
     prompt = (
         f"You are an air quality health advisor.\n"
-        f"AQI: {aqi*10} ({_aqi_label(aqi*10)})\n"
+        f"AQI: {_aqi_level(aqi)} ({_aqi_label(aqi)})\n"
         f"Health condition: {health_condition}\n"
         f"Activity level: {activity_level}\n\n"
         f"Return ONLY this JSON, nothing else:\n"

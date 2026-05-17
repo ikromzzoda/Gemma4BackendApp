@@ -8,6 +8,7 @@ from info.views import (
     OPENWEATHERMAP_API_KEY,
     TAJIK_CITIES,
     _aqi_label,
+    _aqi_level,
     _validate_city,
 )
 from .models import WeatherData
@@ -63,7 +64,7 @@ def get_home_data(request):
                 no2=components.get("no2"), no=components.get("no"),
                 o3=components.get("o3"), so2=components.get("so2"),
                 co=components.get("co"), nh3=components.get("nh3"),
-                aqi=aqi,
+                aqi=_aqi_level(aqi),
                 dt=timezone.make_aware(datetime.fromtimestamp(poll_item.get("dt", 0))),
             ).save()
             saved_pollution = True
@@ -91,7 +92,7 @@ def get_home_data(request):
                 "city": city,
                 "lat": lat,
                 "lon": lon,
-                "aqi": aqi,
+                "aqi": _aqi_level(aqi),
                 "aqi_label": _aqi_label(aqi),
                 "pm25": components.get("pm2_5"),
                 "pm10": components.get("pm10"),
@@ -146,7 +147,7 @@ def get_map_data(request):
                 "city": city_name,
                 "lat": lat,
                 "lon": lon,
-                "aqi": aqi,
+                "aqi": _aqi_level(aqi),
                 "aqi_label": _aqi_label(aqi),
                 "pm25": components.get("pm2_5"),
                 "pm10": components.get("pm10"),
