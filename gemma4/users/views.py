@@ -1,7 +1,10 @@
 import json
+import logging
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from .models import User
+
+logger = logging.getLogger(__name__)
 
 VALID_AGE_GROUPS = ["Under 18", "18 - 24", "25 - 34", "35 - 44", "45 - 54", "55 - 64", "65+"]
 VALID_HEALTH_CONDITIONS = ["Asthma", "Allergies", "Bronchitis", "COPD", "Heart Condition", "None", "Others"]
@@ -13,6 +16,7 @@ VALID_LOCATIONS = [
 UPDATABLE_FIELDS = [
     "location", "ageGroup", "healthCondition", "activityLevel",
     "notificationsEnabled", "dailyForecastEnabled", "healthTipsEnabled", "profilePicUrl",
+    "fcmToken",
 ]
 
 
@@ -30,6 +34,7 @@ def _user_to_dict(user):
         "dailyForecastEnabled": user.dailyForecastEnabled,
         "healthTipsEnabled": user.healthTipsEnabled,
         "profilePicUrl": user.profilePicUrl,
+        "fcmToken": user.fcmToken,
     }
 
 
@@ -107,4 +112,29 @@ def create_user(request):
         user.save()
         return JsonResponse({"status": "success", "data": _user_to_dict(user)}, status=201)
     except Exception as e:
+        return JsonResponse({"status": "error", "error": "Internal server error", "detail": str(e)}, status=500)
+
+
+@csrf_exempt
+def update_fcm_token(request, uid):
+    if request.method != "POST":
+        return JsonResponse({"status": "error", "error": "Method not allowed"}, status=405)
+    try:
+        body = json.loads(request.body)
+    except (json.JSONDecodeError, Exception):
+        return JsonResponse({"status": "error", "error": "Invalid JSON body"}, status=400)
+
+    fcm_token = body.get("fcmToken", "").strip()
+    if not fcm_token:
+        return JsonResponse({"status": "error", "error": "fcmToken is required"}, status=400)
+
+    try:
+        user = User.collection.filter("uid", "==", uid).get()
+        if not user:
+            return JsonResponse({"status": "error", "error": "User not found"}, status=404)
+        user.fcmToken = fcm_token
+        user.update()
+        return JsonResponse({"status": "success"})
+    except Exception as e:
+        logger.error(f"update_fcm_token: {e}")
         return JsonResponse({"status": "error", "error": "Internal server error", "detail": str(e)}, status=500)

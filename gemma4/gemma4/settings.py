@@ -39,10 +39,13 @@ except Exception as e:
     print(f"Warning: Firebase connection failed - {e}")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv('DJANGO_DEBUG', 'True').lower() in ('1', 'true', 'yes')
 
-ALLOWED_HOSTS = ['192.168.0.118', 'localhost', '127.0.0.1']
-
+ALLOWED_HOSTS = [
+    'gemma4-django-105829172718.europe-west3.run.app',
+    'localhost',
+    '127.0.0.1',
+] 
 
 # Application definition
 
@@ -64,6 +67,8 @@ INSTALLED_APPS = [
 # Redis как брокер
 CELERY_BROKER_URL = 'redis://localhost:6379/0'
 CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
+CELERY_TIMEZONE = 'Asia/Dushanbe'
+CELERY_ENABLE_UTC = True
 
 # Координаты и ключ для автозапроса
 AUTO_FETCH_LAT = 41.2995
@@ -72,6 +77,7 @@ AUTO_FETCH_LON = 69.2401
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -149,5 +155,21 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 
+# Static files: collect into `staticfiles` and serve via WhiteNoise in the container.
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+# Use compressed manifest storage when collecting static files for production
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+
+# When running behind a proxy (Cloud Run), honor X-Forwarded-Proto for request.is_secure()
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
 GEMMA4_API_KEY = os.getenv('GEMMA4_API_KEY', '')
 GEMMA4_MODEL = os.getenv('GEMMA4_MODEL', 'gemma-4-26b-a4b-it')
+
+
+# CSRF_TRUSTED_ORIGINS = [
+#      # Replace with your Serveo URL
+#     "https://gemma4-django-105829172718.europe-west3.run.app",
+#     "http://localhost",
+#     "http://127.0.0.1"
+# ]

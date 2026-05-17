@@ -86,6 +86,32 @@ Endpoint **fails completely**.
 
 ---
 
+## 3b. POST /api/users/\<uid\>/fcm-token/
+
+### Scenario 1 — OpenWeatherMap unavailable
+**Not applicable.** This endpoint makes no external API calls.
+
+### Scenario 2 — Firestore unavailable
+
+`User.collection.filter("uid", "==", uid).get()` raises → caught by `except Exception as e`.
+
+**HTTP 500**
+```json
+{
+  "status": "error",
+  "error": "Internal server error",
+  "detail": "<Firestore exception message>"
+}
+```
+Endpoint **fails completely**.
+
+If lookup succeeds but `user.update()` raises → same `except Exception as e` block, same 500 shape.
+
+### Scenario 3 — Gemma4 / FCM unavailable
+**Not applicable.** This endpoint does not call any AI or FCM API.
+
+---
+
 ## 4. GET /api/air-pollution/
 
 ### Scenario 1 — OpenWeatherMap unavailable
@@ -541,6 +567,8 @@ Endpoint **fails completely**.
 | `PUT /api/users/<uid>/update/` | Firestore unavailable | **500** | Fails completely |
 | `GET /api/users/<uid>/` | OWM unavailable | — | Not affected |
 | `GET /api/users/<uid>/` | Firestore unavailable | **500** | Fails completely |
+| `POST /api/users/<uid>/fcm-token/` | OWM unavailable | — | Not affected |
+| `POST /api/users/<uid>/fcm-token/` | Firestore unavailable | **500** | Fails completely |
 | `GET /api/air-pollution/` | OWM unavailable | **500** | Fails completely |
 | `GET /api/air-pollution/` | Firestore unavailable | **500** | Fails completely (API data lost) |
 | `GET /api/air-pollution/all/` | OWM unavailable | — | Not affected |
@@ -595,3 +623,7 @@ Endpoint **fails completely**.
 9. **`DELETE /api/chat/sessions/<id>/delete/` can leave orphan messages** — if Firestore fails mid-loop, some messages may be deleted while others remain. There is no transaction or rollback.
 
 10. **All chat endpoints use `"status": "error"` in error responses** — consistent with the users, forecast, advice, home, and map endpoints, unlike the air-pollution group.
+
+11. **`POST /api/users/<uid>/fcm-token/` is Firestore-only** — no OWM or AI calls. The only failure mode is a Firestore error (500). An invalid/missing `fcmToken` body field returns 400 before any DB call.
+
+12. **`send_weather_advice_notifications` (background task) never crashes the whole batch** — per-user FCM failures are caught individually and logged. OpenWeatherMap failures for a specific user increment the `failed` counter and skip to the next user. The task logs a `notified=N, failed=N` summary on completion.

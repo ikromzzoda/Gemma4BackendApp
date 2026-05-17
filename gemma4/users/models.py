@@ -14,6 +14,7 @@ class User(models.Model):
     dailyForecastEnabled = models.BooleanField(required=False, default=True)
     healthTipsEnabled = models.BooleanField(required=False, default=False)
     profilePicUrl = models.TextField(required=False)
+    fcmToken = models.TextField(required=False, default="")
 
     class Meta:
         collection_name = "users"

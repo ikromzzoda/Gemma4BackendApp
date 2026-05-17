@@ -57,6 +57,7 @@ Creates a new user profile in Firestore.
 | `dailyForecastEnabled` | boolean | No | `true` | |
 | `healthTipsEnabled` | boolean | No | `false` | |
 | `profilePicUrl` | string | No | `""` | Any URL string |
+| `fcmToken` | string | No | `""` | Firebase Cloud Messaging device token |
 
 **Example request:**
 ```json
@@ -89,7 +90,8 @@ Creates a new user profile in Firestore.
     "notificationsEnabled": true,
     "dailyForecastEnabled": true,
     "healthTipsEnabled": false,
-    "profilePicUrl": ""
+    "profilePicUrl": "",
+    "fcmToken": ""
   }
 }
 ```
@@ -122,6 +124,7 @@ Send only the fields you want to change. All fields are optional.
 | `dailyForecastEnabled` | boolean | `true` / `false` |
 | `healthTipsEnabled` | boolean | `true` / `false` |
 | `profilePicUrl` | string | Any URL string |
+| `fcmToken` | string | Any non-empty string |
 
 **Example request:**
 ```json
@@ -151,7 +154,8 @@ Returns the complete updated user object (same shape as create):
     "notificationsEnabled": true,
     "dailyForecastEnabled": true,
     "healthTipsEnabled": true,
-    "profilePicUrl": ""
+    "profilePicUrl": "",
+    "fcmToken": ""
   }
 }
 ```
@@ -185,7 +189,8 @@ Returns a user profile by UID.
     "notificationsEnabled": true,
     "dailyForecastEnabled": true,
     "healthTipsEnabled": false,
-    "profilePicUrl": ""
+    "profilePicUrl": "",
+    "fcmToken": ""
   }
 }
 ```
@@ -856,6 +861,77 @@ Returns the updated session object:
   }
 }
 ```
+
+---
+
+### 17. POST /api/users/\<uid\>/fcm-token/
+
+Registers or updates the Firebase Cloud Messaging (FCM) device token for a user.  
+Called by the mobile app after obtaining a new FCM token from Firebase SDK (e.g. on first launch or after token refresh).
+
+**CSRF:** Exempt
+
+#### URL Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `uid` | string | **Yes** | Firebase Auth UID |
+
+#### Request Body
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `fcmToken` | string | **Yes** | FCM device token from Firebase SDK. Whitespace-only is rejected. |
+
+**Example request:**
+```json
+{
+  "fcmToken": "eXaMpLeFcMtOkEn_abc123..."
+}
+```
+
+#### Success Response — `200 OK`
+
+```json
+{
+  "status": "success"
+}
+```
+
+---
+
+## Background Tasks
+
+These are internal Celery tasks triggered by Celery Beat — they have no HTTP endpoint.
+
+### send_weather_advice_notifications
+
+**Schedule:** 07:00, 10:00, 13:00, 16:00, 19:00 Asia/Dushanbe timezone (5× daily)  
+**Task path:** `weather.tasks.send_weather_advice_notifications`
+
+For every user in Firestore where `notificationsEnabled = true` and `fcmToken` is not empty:
+
+1. Fetches current air pollution (AQI, PM2.5, PM10) and weather (temperature, description) from OpenWeatherMap for the user's `location`.
+2. Calls the **Gemma4 API** to generate a short personalised 2-sentence outdoor advice based on AQI and user profile (`ageGroup`, `healthCondition`, `activityLevel`). AQI is multiplied by 10 before being sent to the AI.
+3. Sends an FCM push notification via **Firebase Cloud Messaging**:
+
+```
+Title: "🌤 Air Quality Update"
+Body:  <AI-generated or fallback advice>
+Data:  { type, city, aqi, aqi_label, temperature }
+```
+
+**Fallback advice** (used when Gemma4 is unavailable):
+
+| AQI (raw) | Fallback text |
+|-----------|--------------|
+| 1 | "Air quality is excellent in {city} today. Great time to go outside!" |
+| 2 | "Air quality is fair in {city}. Safe to go outside, enjoy your day!" |
+| 3 | "Air quality is moderate in {city}. Sensitive groups should limit outdoor time." |
+| 4 | "Air quality is unhealthy in {city}. Consider wearing a mask outdoors." |
+| 5 | "Air quality is very unhealthy in {city}. Avoid going outside if possible." |
+
+**Error handling:** If FCM send fails for a specific user (invalid token, etc.), the error is logged and the task continues to the next user — no crash. A summary is logged at the end: `notified=N, failed=N`.
 
 ---
 

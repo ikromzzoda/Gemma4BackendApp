@@ -1,0 +1,10 @@
+Django==5.1.8
+gunicorn==21.2.0
+whitenoise==6.5.0
+python-dotenv==1.2.2
+fireo==2.2.2
+firebase-admin==6.5.0
+requests==2.32.3
+django-cors-headers==3.14.0
+celery==5.3.6
+django-celery-beat==2.9.0
