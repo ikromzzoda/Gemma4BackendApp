@@ -13,6 +13,8 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 from pathlib import Path
 import os
 import fireo
+import firebase_admin
+from firebase_admin import credentials
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent.parent / '.env')
@@ -36,7 +38,16 @@ FIREBASE_KEY_PATH = os.path.join(BASE_DIR, 'gemma4-8e8c0-firebase-adminsdk-fbsvc
 try:
     fireo.connection(from_file=FIREBASE_KEY_PATH)
 except Exception as e:
-    print(f"Warning: Firebase connection failed - {e}")
+    print(f"Warning: Firebase (FireO) connection failed - {e}")
+
+# Initialize Firebase Admin SDK
+try:
+    if not firebase_admin._apps:
+        cred = credentials.Certificate(FIREBASE_KEY_PATH)
+        firebase_admin.initialize_app(cred)
+        print("✓ Firebase Admin SDK initialized")
+except Exception as e:
+    print(f"Warning: Firebase Admin SDK initialization failed - {e}")
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv('DJANGO_DEBUG', 'True').lower() in ('1', 'true', 'yes')
@@ -45,6 +56,8 @@ ALLOWED_HOSTS = [
     'gemma4-django-105829172718.europe-west3.run.app',
     'localhost',
     '127.0.0.1',
+    '192.168.0.124',
+    '*'
 ] 
 
 # Application definition
