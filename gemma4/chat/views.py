@@ -65,6 +65,10 @@ def _build_system_prompt(user_uid: str) -> str:
         - Use their location as default city for AQI/weather queries.
         - Consider health conditions in every health-related answer.
         - Tailor activity recommendations to their activity level.
+        - ALWAYS reply in the exact language used by the user in their prompt.
+        - When asked about the weather or AQI, restrict the response strictly to weather, 
+        air quality data, and directly related personal recommendations (based on health/activity), 
+        avoiding unrelated topics.
         """.strip()
 
     return SYSTEM_PROMPT + "\n\n" + user_context
