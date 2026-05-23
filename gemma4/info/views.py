@@ -43,6 +43,10 @@ SENSITIVE_CONDITIONS = {"Asthma", "COPD", "Bronchitis", "Heart Condition", "Alle
 
 import random
 
+
+# Кэш: { (aqi_level, "YYYY-MM-DD-HH"): cached_value }
+_aqi_cache: dict = {}
+
 def _aqi_level(aqi):
     ranges = {
         1: (0, 50),
@@ -51,8 +55,24 @@ def _aqi_level(aqi):
         4: (151, 200),
         5: (201, 300),
     }
+
+    # Ключ: уровень AQI + текущий час (меняется каждый час)
+    hour_key = datetime.now().strftime("%Y-%m-%d-%H")
+    cache_key = (aqi, hour_key)
+
+    if cache_key in _aqi_cache:
+        return _aqi_cache[cache_key]
+
     low, high = ranges.get(aqi, (0, 0))
-    return random.randint(low, high)
+    value = random.randint(low, high)
+
+    # Очищаем устаревшие записи (не из текущего часа)
+    expired = [k for k in _aqi_cache if k[1] != hour_key]
+    for k in expired:
+        del _aqi_cache[k]
+
+    _aqi_cache[cache_key] = value
+    return value
 
 
 def _aqi_label(aqi):
@@ -193,6 +213,37 @@ def get_air_pollution_by_location(request):
             if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
                 return JsonResponse({'error': 'lat must be between -90 and 90, lon between -180 and 180'}, status=400)
 
+            # Проверяем — есть ли запись за последний час
+            one_hour_ago = timezone.now() - timedelta(hours=1)
+            records = AirPollution.collection.filter('lat', '==', lat).filter('lon', '==', lon).fetch()
+
+            recent_record = None
+            if records:
+                records_list = sorted(list(records), key=lambda r: r.created_at, reverse=True)
+                if records_list and records_list[0].created_at >= one_hour_ago:
+                    recent_record = records_list[0]
+
+            # Если есть свежая запись в БД — возвращаем её
+            if recent_record:
+                return JsonResponse({
+                    'location': {'lat': lat, 'lon': lon},
+                    'data': {
+                        'lat': recent_record.lat,
+                        'lon': recent_record.lon,
+                        'pm25': recent_record.pm25,
+                        'pm10': recent_record.pm10,
+                        'no2': recent_record.no2,
+                        'no': recent_record.no,
+                        'o3': recent_record.o3,
+                        'so2': recent_record.so2,
+                        'co': recent_record.co,
+                        'nh3': recent_record.nh3,
+                        'aqi': recent_record.aqi,
+                        'dt': str(recent_record.dt),
+                    },
+                }, status=200)
+
+            # Нет свежей записи — получаем из API
             url = f"http://api.openweathermap.org/data/2.5/air_pollution?lat={lat}&lon={lon}&appid={OPENWEATHERMAP_API_KEY}"
             response = requests.get(url, timeout=10)
             response.raise_for_status()
@@ -211,37 +262,23 @@ def get_air_pollution_by_location(request):
                 'o3': components.get('o3'), 'so2': components.get('so2'),
                 'co': components.get('co'), 'nh3': components.get('nh3'),
                 'aqi': _aqi_level(poll_data.get('main', {}).get('aqi')),
-                'dt': str(timezone.make_aware(datetime.fromtimestamp(poll_data.get('dt', 0)))),
+                'dt': timezone.make_aware(datetime.fromtimestamp(poll_data.get('dt', 0))),
             }
 
-            twelve_hours_ago = timezone.now() - timedelta(hours=12)
-            records = AirPollution.collection.filter('lat', '==', lat).filter('lon', '==', lon).fetch()
-
-            last_record_12h = None
-            all_records_list = []
-            if records:
-                records_list = list(records)
-                records_list.sort(key=lambda x: x.created_at, reverse=True)
-                for record in records_list:
-                    row = {
-                        'id': record.id, 'lat': record.lat, 'lon': record.lon,
-                        'pm25': record.pm25, 'pm10': record.pm10,
-                        'no2': record.no2, 'no': record.no,
-                        'o3': record.o3, 'so2': record.so2,
-                        'co': record.co, 'nh3': record.nh3,
-                        'aqi': record.aqi,
-                        'dt': str(record.dt), 'created_at': str(record.created_at),
-                    }
-                    all_records_list.append(row)
-                    if last_record_12h is None and record.created_at >= twelve_hours_ago:
-                        last_record_12h = row
+            # Сохраняем в БД
+            air_pollution = AirPollution(
+                lat=fresh_data['lat'], lon=fresh_data['lon'],
+                pm25=fresh_data['pm25'], pm10=fresh_data['pm10'],
+                no2=fresh_data['no2'], no=fresh_data['no'],
+                o3=fresh_data['o3'], so2=fresh_data['so2'],
+                co=fresh_data['co'], nh3=fresh_data['nh3'],
+                aqi=fresh_data['aqi'], dt=fresh_data['dt'],
+            )
+            air_pollution.save()
 
             return JsonResponse({
                 'location': {'lat': lat, 'lon': lon},
-                'fresh_data_from_api': fresh_data,
-                'last_cached_record': last_record_12h,
-                'all_records_history': all_records_list,
-                'total_records': len(all_records_list),
+                'data': {**fresh_data, 'dt': str(fresh_data['dt'])},
             }, status=200)
 
         except requests.exceptions.RequestException as e:
@@ -249,7 +286,6 @@ def get_air_pollution_by_location(request):
         except Exception as e:
             return JsonResponse({'error': f'Error fetching data: {str(e)}'}, status=500)
     return JsonResponse({'error': 'Method not allowed'}, status=405)
-
 
 # ─── new endpoints ─────────────────────────────────────────────────────────────
 
