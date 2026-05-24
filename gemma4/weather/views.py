@@ -2,14 +2,16 @@ from django.http import JsonResponse
 from django.utils import timezone
 import requests
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
 
 from info.models import AirPollution
 from info.views import (
     OPENWEATHERMAP_API_KEY,
     TAJIK_CITIES,
     _aqi_label,
-    _aqi_level,
+    get_aqi_by_coords,
     _validate_city,
+    _aqi_label_us,
 )
 from .models import WeatherData
 
@@ -64,7 +66,7 @@ def get_home_data(request):
                 no2=components.get("no2"), no=components.get("no"),
                 o3=components.get("o3"), so2=components.get("so2"),
                 co=components.get("co"), nh3=components.get("nh3"),
-                aqi=_aqi_level(aqi),
+                aqi=get_aqi_by_coords(lat, lon), #_aqi_level(aqi),
                 dt=timezone.make_aware(datetime.fromtimestamp(poll_item.get("dt", 0))),
             ).save()
             saved_pollution = True
@@ -92,7 +94,7 @@ def get_home_data(request):
                 "city": city,
                 "lat": lat,
                 "lon": lon,
-                "aqi": _aqi_level(aqi),
+                "aqi": get_aqi_by_coords(lat, lon),
                 "aqi_label": _aqi_label(aqi),
                 "pm25": components.get("pm2_5"),
                 "pm10": components.get("pm10"),
@@ -113,7 +115,6 @@ def get_home_data(request):
     except Exception as e:
         return JsonResponse({"status": "error", "error": "Internal server error", "detail": str(e)}, status=500)
 
-
 def get_map_data(request):
     if request.method != 'GET':
         return JsonResponse({"status": "error", "error": "Method not allowed"}, status=405)
@@ -123,41 +124,53 @@ def get_map_data(request):
     if pollutant not in valid_pollutants:
         return JsonResponse({"status": "error", "error": "Invalid pollutant", "valid_pollutants": valid_pollutants}, status=400)
 
-    cities_data = []
-    for city_name, coords in TAJIK_CITIES.items():
-        lat, lon = coords["lat"], coords["lon"]
+    def fetch_city_data(city_name, lat, lon):
         try:
-            poll_resp = requests.get(
-                f"http://api.openweathermap.org/data/2.5/air_pollution?lat={lat}&lon={lon}&appid={OPENWEATHERMAP_API_KEY}",
-                timeout=10,
-            )
-            poll_resp.raise_for_status()
-            weather_resp = requests.get(
-                f"http://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={OPENWEATHERMAP_API_KEY}&units=metric",
-                timeout=10,
-            )
-            weather_resp.raise_for_status()
+            # Все три запроса параллельно для каждого города
+            with ThreadPoolExecutor(max_workers=3) as ex:
+                poll_future = ex.submit(lambda: requests.get(
+                    f"http://api.openweathermap.org/data/2.5/air_pollution?lat={lat}&lon={lon}&appid={OPENWEATHERMAP_API_KEY}",
+                    timeout=10,
+                ))
+                weather_future = ex.submit(lambda: requests.get(
+                    f"http://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={OPENWEATHERMAP_API_KEY}&units=metric",
+                    timeout=10,
+                ))
+                aqi_future = ex.submit(get_aqi_by_coords, lat, lon)
+
+                poll_resp = poll_future.result()
+                poll_resp.raise_for_status()
+                weather_resp = weather_future.result()
+                weather_resp.raise_for_status()
+                aqi = aqi_future.result()
 
             poll_item = poll_resp.json()["list"][0]
             components = poll_item.get("components", {})
-            aqi = poll_item["main"]["aqi"]
             temperature = weather_resp.json().get("main", {}).get("temp")
 
-            cities_data.append({
+            return {
                 "city": city_name,
                 "lat": lat,
                 "lon": lon,
-                "aqi": _aqi_level(aqi),
-                "aqi_label": _aqi_label(aqi),
+                "aqi": aqi,
+                "aqi_label": _aqi_label_us(aqi),  # ✅ US шкала
                 "pm25": components.get("pm2_5"),
                 "pm10": components.get("pm10"),
                 "o3": components.get("o3"),
                 "no2": components.get("no2"),
                 "temperature": temperature,
-            })
+            }
         except requests.exceptions.RequestException:
-            cities_data.append({"city": city_name, "lat": lat, "lon": lon, "error": "Data unavailable"})
+            return {"city": city_name, "lat": lat, "lon": lon, "error": "Data unavailable"}
         except Exception as e:
-            cities_data.append({"city": city_name, "lat": lat, "lon": lon, "error": str(e)})
+            return {"city": city_name, "lat": lat, "lon": lon, "error": str(e)}
+
+    # Все города параллельно
+    with ThreadPoolExecutor(max_workers=len(TAJIK_CITIES)) as executor:
+        futures = [
+            executor.submit(fetch_city_data, city_name, coords["lat"], coords["lon"])
+            for city_name, coords in TAJIK_CITIES.items()
+        ]
+        cities_data = [f.result() for f in futures]
 
     return JsonResponse({"status": "success", "data": {"pollutant": pollutant, "cities": cities_data}})

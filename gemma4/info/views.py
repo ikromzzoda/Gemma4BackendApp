@@ -18,6 +18,17 @@ OPENWEATHERMAP_API_KEY = os.getenv('OPENWEATHERMAP_API_KEY')
 DUSHANBE_LAT = 38.5598
 DUSHANBE_LON = 68.7738
 
+AQI_LABELS = {
+    1: "Good",
+    2: "Moderate",
+    3: "Unhealthy for Sensitive Groups",
+    4: "Unhealthy",
+    5: "Very Unhealthy",
+}
+
+
+SENSITIVE_CONDITIONS = {"Asthma", "COPD", "Bronchitis", "Heart Condition", "Allergies"}
+
 TAJIK_CITIES = {
     "Dushanbe":    {"lat": 38.5598, "lon": 68.7738},
     "Khujand":     {"lat": 40.2827, "lon": 69.6223},
@@ -28,56 +39,45 @@ TAJIK_CITIES = {
     "Khorugh":     {"lat": 37.4897, "lon": 71.5528},
     "Tursunzoda":  {"lat": 38.5595, "lon": 68.2228},
     "Hisor":       {"lat": 38.5260, "lon": 68.5428},
+    "Dangara":     {"lat": 38.0958, "lon": 69.3400},
+    "Baljuvon":    {"lat": 38.1900, "lon": 69.6600},
 }
 
-AQI_LABELS = {
-    1: "Good",
-    2: "Fair",
-    3: "Moderate",
-    4: "Unhealthy for Sensitive Groups",
-    5: "Very Unhealthy",
-}
-
-
-SENSITIVE_CONDITIONS = {"Asthma", "COPD", "Bronchitis", "Heart Condition", "Allergies"}
-
-import random
-
-
-# Кэш: { (aqi_level, "YYYY-MM-DD-HH"): cached_value }
-_aqi_cache: dict = {}
-
-def _aqi_level(aqi):
-    ranges = {
-        1: (0, 50),
-        2: (51, 100),
-        3: (101, 150),
-        4: (151, 200),
-        5: (201, 300),
-    }
-
-    # Ключ: уровень AQI + текущий час (меняется каждый час)
-    hour_key = datetime.now().strftime("%Y-%m-%d-%H")
-    cache_key = (aqi, hour_key)
-
-    if cache_key in _aqi_cache:
-        return _aqi_cache[cache_key]
-
-    low, high = ranges.get(aqi, (0, 0))
-    value = random.randint(low, high)
-
-    # Очищаем устаревшие записи (не из текущего часа)
-    expired = [k for k in _aqi_cache if k[1] != hour_key]
-    for k in expired:
-        del _aqi_cache[k]
-
-    _aqi_cache[cache_key] = value
-    return value
+import requests
+def get_aqi_by_coords(lat, lon):
+    token = "b70c70c5-4398-46ef-97f1-0e6b82b9b128"
+    try:
+        url = f"https://api.airvisual.com/v2/nearest_city?lat={lat}&lon={lon}&key={token}"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        if data["status"] == "success":
+            return data["data"]["current"]["pollution"]["aqius"]
+        return None
+    except requests.exceptions.RequestException:
+        return None
 
 
 def _aqi_label(aqi):
     return AQI_LABELS.get(aqi, "Unknown")
 
+
+def _aqi_label_us(aqi):
+    if aqi is None:
+        return "Unknown"
+    if aqi <= 50:
+        return "Good"
+    elif aqi <= 100:
+        return "Moderate"
+    elif aqi <= 150:
+        return "Unhealthy for Sensitive Groups"
+    elif aqi <= 200:
+        return "Unhealthy"
+    elif aqi <= 300:
+        return "Very Unhealthy"
+    else:
+        return "Hazardous"
+    
 
 def _validate_city(city):
     if city not in TAJIK_CITIES:
@@ -120,12 +120,12 @@ def fetch_and_save_air_pollution(lat=None, lon=None):
             'so2': components.get('so2'),
             'co': components.get('co'),
             'nh3': components.get('nh3'),
-            'aqi': poll_data.get('main', {}).get('aqi'),  # пока сырой
+            'aqi': get_aqi_by_coords(lat, lon),
             'dt': timezone.make_aware(datetime.fromtimestamp(poll_data.get('dt', 0))),
         }
 
         # конвертируем перед сохранением и возвратом
-        api_data['aqi'] = _aqi_level(api_data['aqi'])
+        api_data['aqi'] = get_aqi_by_coords(lat, lon) #_aqi_level(api_data['aqi'])
 
         twelve_hours_ago = timezone.now() - timedelta(hours=12)
         last_record = AirPollution.collection.filter('lat', '==', lat).filter('lon', '==', lon).fetch()
@@ -185,7 +185,7 @@ def get_all_air_pollution(request):
                     'no2': record.no2, 'no': record.no,
                     'o3': record.o3, 'so2': record.so2,
                     'co': record.co, 'nh3': record.nh3,
-                    'aqi': _aqi_level(record.aqi),
+                    'aqi': record.api, #_aqi_level(record.aqi),
                     'dt': str(record.dt),
                     'created_at': str(record.created_at),
                 })
@@ -193,6 +193,7 @@ def get_all_air_pollution(request):
         except Exception as e:
             return JsonResponse({'error': f'Error fetching data: {str(e)}'}, status=500)
     return JsonResponse({'error': 'Method not allowed'}, status=405)
+
 
 
 def get_air_pollution_by_location(request):
@@ -261,7 +262,7 @@ def get_air_pollution_by_location(request):
                 'no2': components.get('no2'), 'no': components.get('no'),
                 'o3': components.get('o3'), 'so2': components.get('so2'),
                 'co': components.get('co'), 'nh3': components.get('nh3'),
-                'aqi': _aqi_level(poll_data.get('main', {}).get('aqi')),
+                'aqi': get_aqi_by_coords(lat, lon),
                 'dt': timezone.make_aware(datetime.fromtimestamp(poll_data.get('dt', 0))),
             }
 
@@ -287,7 +288,8 @@ def get_air_pollution_by_location(request):
             return JsonResponse({'error': f'Error fetching data: {str(e)}'}, status=500)
     return JsonResponse({'error': 'Method not allowed'}, status=405)
 
-# ─── new endpoints ─────────────────────────────────────────────────────────────
+
+from concurrent.futures import ThreadPoolExecutor
 
 def get_forecast_data(request):
     if request.method != 'GET':
@@ -304,21 +306,65 @@ def get_forecast_data(request):
         return JsonResponse({"status": "error", "error": "Invalid period", "valid_periods": ["today", "tomorrow", "7days"]}, status=400)
 
     lat, lon = coords["lat"], coords["lon"]
+    now_utc = datetime.now(tz=dt_tz.utc)
+    current_hour = now_utc.strftime("%Y-%m-%d %H:00")
 
-    try:
-        resp = requests.get(
+    def aqi_label_us(aqi):
+        if aqi is None:
+            return "Unknown"
+        if aqi <= 50:
+            return "Good"
+        elif aqi < 100:
+            return "Moderate"
+        elif aqi < 150:
+            return "Unhealthy for Sensitive Groups"
+        elif aqi < 200:
+            return "Unhealthy"
+        elif aqi < 250:
+            return "Very Unhealthy"
+        else:
+            return "Hazardous"
+
+    def aqi_from_pm25(pm25):
+        if pm25 is None:
+            return None
+        if pm25 <= 12.0:
+            return round((pm25 * 50 / 12.0) * 3)
+        elif pm25 <= 35.4:
+            return round((50 + (pm25 - 12.1) * 49 / 23.3) * 3)
+        elif pm25 <= 55.4:
+            return round((100 + (pm25 - 35.5) * 49 / 19.9) * 3)
+        elif pm25 <= 150.4:
+            return round((150 + (pm25 - 55.5) * 49 / 94.9) * 3)
+        elif pm25 <= 250.4:
+            return round((200 + (pm25 - 150.5) * 99 / 99.9) * 3)
+        else:
+            return round((300 + (pm25 - 250.5) * 99 / 99.9) * 3)
+
+    def fetch_current_aqi():
+        return get_aqi_by_coords(lat, lon)
+
+    def fetch_owm_forecast():
+        return requests.get(
             f"http://api.openweathermap.org/data/2.5/air_pollution/forecast?lat={lat}&lon={lon}&appid={OPENWEATHERMAP_API_KEY}",
             timeout=10,
         )
-        resp.raise_for_status()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        aqi_future = executor.submit(fetch_current_aqi)
+        owm_future = executor.submit(fetch_owm_forecast)
+        current_aqi = aqi_future.result()
+        owm_resp = owm_future.result()
+
+    try:
+        owm_resp.raise_for_status()
     except requests.exceptions.RequestException:
         return JsonResponse({"status": "error", "error": "OpenWeatherMap API unavailable"}, status=503)
 
     try:
-        now_utc = datetime.now(tz=dt_tz.utc)
         today_date = now_utc.date()
         tomorrow_date = today_date + timedelta(days=1)
-        all_items = resp.json().get("list", [])
+        all_items = owm_resp.json().get("list", [])
 
         if period == "7days":
             daily = defaultdict(list)
@@ -327,20 +373,24 @@ def get_forecast_data(request):
 
             forecast_points = []
             for date, items in sorted(daily.items()):
-                aqis = [i["main"]["aqi"] for i in items]
                 pm25_vals = [i["components"]["pm2_5"] for i in items]
                 pm10_vals = [i["components"]["pm10"] for i in items]
-                max_aqi_day = max(aqis)
+                avg_pm25 = round(sum(pm25_vals) / len(pm25_vals), 2)
+                avg_pm10 = round(sum(pm10_vals) / len(pm10_vals), 2)
+
+                aqi_value = current_aqi if date == today_date else aqi_from_pm25(avg_pm25)
+
                 forecast_points.append({
                     "date": str(date),
-                    "aqi": _aqi_level(max_aqi_day),
-                    "aqi_label": _aqi_label(max_aqi_day),
-                    "pm25": round(sum(pm25_vals) / len(pm25_vals), 2),
-                    "pm10": round(sum(pm10_vals) / len(pm10_vals), 2),
+                    "aqi": aqi_value,
+                    "aqi_label": aqi_label_us(aqi_value),
+                    "pm25": avg_pm25,
+                    "pm10": avg_pm10,
                 })
 
-            max_aqi = max((p["aqi"] for p in forecast_points), default=0)
+            max_aqi = max((p["aqi"] for p in forecast_points if p["aqi"]), default=0)
             max_pm25 = max((p["pm25"] for p in forecast_points), default=0.0)
+
         else:
             target_date = today_date if period == "today" else tomorrow_date
             filtered = [i for i in all_items if datetime.fromtimestamp(i["dt"], tz=dt_tz.utc).date() == target_date]
@@ -349,16 +399,20 @@ def get_forecast_data(request):
             for item in filtered:
                 dt = datetime.fromtimestamp(item["dt"], tz=dt_tz.utc)
                 components = item.get("components", {})
-                aqi = item["main"]["aqi"]
+                pm25 = components.get("pm2_5")
+                item_hour = dt.strftime("%Y-%m-%d %H:00")
+
+                aqi_value = current_aqi if item_hour == current_hour else aqi_from_pm25(pm25)
+
                 forecast_points.append({
                     "time": dt.strftime("%Y-%m-%d %H:%M"),
-                    "aqi": _aqi_level(aqi),
-                    "aqi_label": _aqi_label(aqi),
-                    "pm25": components.get("pm2_5"),
+                    "aqi": aqi_value,
+                    "aqi_label": aqi_label_us(aqi_value),
+                    "pm25": pm25,
                     "pm10": components.get("pm10"),
                 })
 
-            max_aqi = max((p["aqi"] for p in forecast_points), default=0)
+            max_aqi = max((p["aqi"] for p in forecast_points if p["aqi"]), default=0)
             max_pm25 = max((p["pm25"] for p in forecast_points if p["pm25"] is not None), default=0.0)
 
         return JsonResponse({
@@ -366,13 +420,8 @@ def get_forecast_data(request):
             "data": {
                 "city": city,
                 "period": period,
-                "max_aqi": max_aqi,                    # ✅ уже конвертированный
-                "max_aqi_label": _aqi_label(          # берём label из исходного значения
-                    max(
-                        (i["main"]["aqi"] for i in all_items),
-                        default=1
-                    )
-                ),
+                "max_aqi": max_aqi,
+                "max_aqi_label": aqi_label_us(max_aqi),
                 "max_pm25": max_pm25,
                 "forecast_points": forecast_points,
             },
@@ -404,19 +453,29 @@ def get_ai_advice(request):
 
     lat, lon = coords["lat"], coords["lon"]
 
-    try:
-        resp = requests.get(
+    # Шаг 1: параллельно получаем OWM и AQI
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        owm_future = executor.submit(lambda: requests.get(
             f"http://api.openweathermap.org/data/2.5/air_pollution?lat={lat}&lon={lon}&appid={OPENWEATHERMAP_API_KEY}",
             timeout=10,
-        )
-        resp.raise_for_status()
-    except requests.exceptions.RequestException:
-        return JsonResponse({"status": "error", "error": "OpenWeatherMap API unavailable"}, status=503)
+        ))
+        aqi_future = executor.submit(get_aqi_by_coords, lat, lon)
+
+        try:
+            owm_resp = owm_future.result()
+            owm_resp.raise_for_status()
+        except requests.exceptions.RequestException:
+            return JsonResponse({"status": "error", "error": "OpenWeatherMap API unavailable"}, status=503)
+
+        aqi = aqi_future.result()
 
     try:
-        aqi_raw = resp.json()["list"][0]["main"]["aqi"]  # 1..5, без * 10
-        aqi = _aqi_level(aqi_raw)                        # например 73
-        aqi_label = _aqi_label(aqi_raw)                  # "Moderate"
+        aqi_label = _aqi_label_us(aqi)
+
+        # Шаг 2: сразу запускаем Gemini не дожидаясь ничего лишнего
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            advice_future = executor.submit(generate_advice, aqi, health_condition, activity_level)
+            advice = advice_future.result()
 
         return JsonResponse({
             "status": "success",
@@ -426,11 +485,58 @@ def get_ai_advice(request):
                 "aqi_label": aqi_label,
                 "health_condition": health_condition,
                 "activity_level": activity_level,
-                "advice": generate_advice(aqi_raw, health_condition, activity_level),
+                "advice": advice,
             },
         })
     except Exception as e:
         return JsonResponse({"status": "error", "error": "Internal server error", "detail": str(e)}, status=500)
+
+
+def generate_advice(aqi, health_condition, activity_level):
+    prompt = (
+        f"You are an air quality health advisor.\n"
+        f"AQI: {aqi} ({_aqi_label_us(aqi)})\n"
+        f"Health condition: {health_condition}\n"
+        f"Activity level: {activity_level}\n\n"
+        f"Return ONLY this JSON, nothing else:\n"
+        f'{{"advice": ["tip 1", "tip 2", "tip 3"]}}\n'
+        f"Each tip: 1 short sentence. Max 3 tips."
+    )
+
+    raw = ""
+    try:
+        response = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{settings.GEMMA4_MODEL}:generateContent",
+            params={"key": settings.GEMMA4_API_KEY},
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "maxOutputTokens": 250,
+                    "temperature": 0.2,
+                }
+            },
+            timeout=(10, 60),
+        )
+        response.raise_for_status()
+
+        raw = response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        logger.debug(f"[AI] raw={raw!r}")
+
+        parsed = _extract_json(raw)
+        tips = parsed.get("advice", [])
+
+        if isinstance(tips, list) and tips:
+            return [str(t) for t in tips[:3]]
+        return [str(tips)]
+
+    except requests.exceptions.ReadTimeout:
+        logger.error("generate_advice: TIMEOUT")
+    except ValueError as e:
+        logger.error(f"generate_advice: {e} | raw={raw[:200]!r}")
+    except Exception as e:
+        logger.error(f"generate_advice: {type(e).__name__}: {e}")
+
+    return [f"Air quality is {_aqi_label_us(aqi)}. Check local guidelines for your health condition."]
 
 
 import logging
@@ -464,50 +570,3 @@ def _extract_json(raw: str) -> dict:
             continue
 
     raise ValueError("No valid JSON found in response")
-
-
-def generate_advice(aqi, health_condition, activity_level):
-    prompt = (
-        f"You are an air quality health advisor.\n"
-        f"AQI: {_aqi_level(aqi)} ({_aqi_label(aqi)})\n"
-        f"Health condition: {health_condition}\n"
-        f"Activity level: {activity_level}\n\n"
-        f"Return ONLY this JSON, nothing else:\n"
-        f'{{"advice": ["tip 1", "tip 2", "tip 3"]}}\n'
-        f"Each tip: 1 short sentence. Max 3 tips."
-    )
-
-    raw = ""
-    try:
-        response = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{settings.GEMMA4_MODEL}:generateContent",
-            params={"key": settings.GEMMA4_API_KEY},
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "maxOutputTokens": 200,
-                    "temperature": 0.2,  # ниже = меньше "мыслей"
-                }
-            },
-            timeout=(10, 60),
-        )
-        response.raise_for_status()
-
-        raw = response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-        logger.debug(f"[AI] raw={raw!r}")
-
-        parsed = _extract_json(raw)
-        tips = parsed.get("advice", [])
-
-        if isinstance(tips, list) and tips:
-            return [str(t) for t in tips[:3]]
-        return [str(tips)]
-
-    except requests.exceptions.ReadTimeout:
-        logger.error("generate_advice: TIMEOUT")
-    except ValueError as e:
-        logger.error(f"generate_advice: {e} | raw={raw[:200]!r}")
-    except Exception as e:
-        logger.error(f"generate_advice: {type(e).__name__}: {e}")
-
-    return [f"Air quality is {_aqi_label(aqi)}. Check local guidelines for your health condition."]
