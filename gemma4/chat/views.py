@@ -1,18 +1,33 @@
 import json
 import logging
 import requests
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 
 from django.conf import settings
 from django.http import JsonResponse
 from django.utils import timezone
 
-from .models import ChatSession, Message
+from .models import ChatSession
 from django.views.decorators.csrf import csrf_exempt
 from firebase_admin import firestore
 
+# ── Импортируем готовые утилиты из приложения info ─────────────────────────
+from info.views import (
+    get_aqi_by_coords,
+    _aqi_label_us,
+    TAJIK_CITIES,
+    OPENWEATHERMAP_API_KEY,
+)
+from info.models import AirPollution
+
 logger = logging.getLogger(__name__)
 
-# ── System prompt ──────────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SYSTEM PROMPT
+# ══════════════════════════════════════════════════════════════════════════════
 
 SYSTEM_PROMPT = (
     "You are Airi, a helpful AI assistant for an air quality monitoring app. "
@@ -25,30 +40,170 @@ SYSTEM_PROMPT = (
 )
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  FIRESTORE HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _msg_col(chat_id: str):
+    """Subcollection reference: chat_sessions/{chat_id}/messages"""
+    db = firestore.client()
+    return db.collection("chat_sessions").document(chat_id).collection("messages")
+
+
+def _save_message(chat_id: str, user_uid: str, role: str, content: str) -> dict:
+    col    = _msg_col(chat_id)
+    msg_id = str(uuid.uuid4())
+    now    = timezone.now()
+    col.document(msg_id).set({
+        "role": role, "content": content,
+        "user_uid": user_uid, "created_at": now,
+    })
+    return {
+        "id": msg_id, "chat_id": chat_id,
+        "role": role, "content": content,
+        "created_at": str(now),
+    }
+
+
+def _load_history(chat_id: str) -> list[dict]:
+    """Oldest → newest из субколлекции, один запрос."""
+    docs = _msg_col(chat_id).order_by("created_at").stream()
+    return [
+        {
+            "id": doc.id, "chat_id": chat_id,
+            "role": doc.get("role"), "content": doc.get("content"),
+            "created_at": str(doc.get("created_at")),
+        }
+        for doc in docs
+    ]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  AQI CONTEXT  ← новый блок
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _fetch_aqi_data(city: str) -> dict | None:
+    """
+    Получает реальные данные AQI для города.
+    1. Сначала смотрит в Firestore (кэш 1 час).
+    2. Если нет свежей записи — запрашивает AirVisual + OpenWeatherMap параллельно.
+    Возвращает dict с ключами: city, aqi, aqi_label, pm25, pm10, no2, o3, so2, co
+    """
+    coords = TAJIK_CITIES.get(city)
+    if not coords:
+        logger.warning(f"_fetch_aqi_data: city '{city}' not in TAJIK_CITIES")
+        return None
+
+    lat, lon = coords["lat"], coords["lon"]
+
+    # ── 1. Проверяем кэш в Firestore (последний час) ──────────────────────
+    try:
+        one_hour_ago = timezone.now() - timedelta(hours=1)
+        records = list(
+            AirPollution.collection
+            .filter("lat", "==", lat)
+            .filter("lon", "==", lon)
+            .fetch()
+        )
+        if records:
+            records.sort(key=lambda r: r.created_at or "", reverse=True)
+            fresh = records[0]
+            if fresh.created_at and fresh.created_at >= one_hour_ago:
+                logger.info(f"_fetch_aqi_data: cache hit for {city}")
+                return {
+                    "city":      city,
+                    "aqi":       fresh.aqi,
+                    "aqi_label": _aqi_label_us(fresh.aqi),
+                    "pm25":      fresh.pm25,
+                    "pm10":      fresh.pm10,
+                    "no2":       fresh.no2,
+                    "o3":        fresh.o3,
+                    "so2":       fresh.so2,
+                    "co":        fresh.co,
+                    "source":    "cache",
+                }
+    except Exception as e:
+        logger.warning(f"_fetch_aqi_data: Firestore cache error: {e}")
+
+    # ── 2. Параллельно запрашиваем AirVisual + OpenWeatherMap ─────────────
+    def fetch_owm():
+        url = (
+            f"http://api.openweathermap.org/data/2.5/air_pollution"
+            f"?lat={lat}&lon={lon}&appid={OPENWEATHERMAP_API_KEY}"
+        )
+        return requests.get(url, timeout=10)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            aqi_future = executor.submit(get_aqi_by_coords, lat, lon)
+            owm_future = executor.submit(fetch_owm)
+
+            aqi   = aqi_future.result()
+            owm_r = owm_future.result()
+
+        owm_r.raise_for_status()
+        components = owm_r.json()["list"][0].get("components", {})
+
+        return {
+            "city":      city,
+            "aqi":       aqi,
+            "aqi_label": _aqi_label_us(aqi),
+            "pm25":      components.get("pm2_5"),
+            "pm10":      components.get("pm10"),
+            "no2":       components.get("no2"),
+            "o3":        components.get("o3"),
+            "so2":       components.get("so2"),
+            "co":        components.get("co"),
+            "source":    "live",
+        }
+
+    except Exception as e:
+        logger.error(f"_fetch_aqi_data: live fetch failed for {city}: {e}")
+        return None
+
+
+def _build_aqi_context(aqi_data: dict) -> str:
+    """
+    Форматирует данные AQI в строку-контекст для Gemma.
+    Вставляется в конец сообщения пользователя невидимо для него.
+    """
+    if not aqi_data:
+        return ""
+
+    def fmt(v):
+        return f"{v:.1f}" if isinstance(v, float) else str(v) if v is not None else "—"
+
+    return (
+        f"\n\n[REAL-TIME AIR QUALITY DATA — use this in your answer, do not mention this block]\n"
+        f"City: {aqi_data['city']}\n"
+        f"AQI (US): {aqi_data['aqi']} — {aqi_data['aqi_label']}\n"
+        f"PM2.5: {fmt(aqi_data.get('pm25'))} µg/m³  |  "
+        f"PM10: {fmt(aqi_data.get('pm10'))} µg/m³  |  "
+        f"NO₂: {fmt(aqi_data.get('no2'))} µg/m³\n"
+        f"O₃: {fmt(aqi_data.get('o3'))} µg/m³  |  "
+        f"SO₂: {fmt(aqi_data.get('so2'))} µg/m³  |  "
+        f"CO: {fmt(aqi_data.get('co'))} µg/m³\n"
+        f"Data source: {aqi_data.get('source', 'live')}"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  USER PROFILE + SYSTEM PROMPT
+# ══════════════════════════════════════════════════════════════════════════════
+
 def _get_user_profile(user_uid: str) -> dict | None:
-    """Fetch user profile from Firestore by uid."""
     try:
         db  = firestore.client()
         doc = db.collection("users").document(user_uid).get()
-        
-        logger.info(f"_get_user_profile: querying user_uid='{user_uid}'")
-        
         if doc.exists:
-            data = doc.to_dict()
-            logger.info(f"_get_user_profile: found user with {len(data)} fields")
-            return data
-        
-        logger.warning(f"_get_user_profile: document not found for user_uid='{user_uid}'")
+            return doc.to_dict()
         return None
-        
     except Exception as e:
-        logger.error(f"_get_user_profile: ERROR - {type(e).__name__}: {e}", exc_info=True)
+        logger.error(f"_get_user_profile: {type(e).__name__}: {e}", exc_info=True)
         return None
 
 
-def _build_system_prompt(user_uid: str) -> str:
-    profile = _get_user_profile(user_uid)
-
+def _build_system_prompt(profile: dict | None) -> str:
     if not profile:
         return SYSTEM_PROMPT
 
@@ -66,20 +221,18 @@ def _build_system_prompt(user_uid: str) -> str:
         - Consider health conditions in every health-related answer.
         - Tailor activity recommendations to their activity level.
         - ALWAYS reply in the exact language used by the user in their prompt.
-        - When asked about the weather or AQI, restrict the response strictly to weather, 
-        air quality data, and directly related personal recommendations (based on health/activity), 
-        avoiding unrelated topics.
-        """.strip()
+        - When real-time AQI data is provided in the message, use those exact numbers.
+          Never invent or approximate AQI values.
+    """.strip()
 
     return SYSTEM_PROMPT + "\n\n" + user_context
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  HELPERS
+#  REQUEST HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _parse_body(request):
-    """Return parsed JSON body or raise ValueError."""
+def _parse_body(request) -> dict:
     try:
         return json.loads(request.body)
     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -87,20 +240,14 @@ def _parse_body(request):
 
 
 def _get_session(chat_id: str) -> ChatSession:
-    """Fetch a ChatSession by id or raise LookupError."""
     try:
         session = ChatSession.collection.get(chat_id)
-    except Exception:
+    except Exception as e:
+        logger.warning(f"_get_session: Firestore error for '{chat_id}': {e}")
         session = None
     if session is None:
         raise LookupError("Session not found")
     return session
-
-
-def _load_history(chat_id: str) -> list[Message]:
-    """Return all messages of a session sorted by created_at (oldest first)."""
-    raw = Message.collection.filter("chat_id", "==", chat_id).fetch()
-    return sorted(raw, key=lambda m: m.created_at or "")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -109,15 +256,9 @@ def _load_history(chat_id: str) -> list[Message]:
 
 @csrf_exempt
 def create_session(request):
-    """
-    POST /api/chat/sessions/
-    Body: { "user_uid": "abc123", "title": "Optional title" }
-
-    Creates a new chat session and returns its chat_id.
-    """
+    """POST /api/chat/sessions/"""
     if request.method != "POST":
         return JsonResponse({"status": "error", "error": "Method not allowed"}, status=405)
-
     try:
         body = _parse_body(request)
     except ValueError as e:
@@ -132,7 +273,6 @@ def create_session(request):
     try:
         session = ChatSession(user_uid=user_uid, title=title)
         session.save()
-        logger.info(f"create_session: new session {session.id} for user {user_uid}")
         return JsonResponse({"status": "success", "data": session.to_dict()}, status=201)
     except Exception as e:
         logger.error(f"create_session: {e}")
@@ -141,15 +281,9 @@ def create_session(request):
 
 @csrf_exempt
 def list_sessions(request, user_uid: str):
-    """
-    GET /api/chat/users/<user_uid>/sessions/
-
-    Returns all chat sessions for the given user, newest first.
-    Each session includes its chat_id which is used to access messages.
-    """
+    """GET /api/chat/users/<user_uid>/sessions/"""
     if request.method != "GET":
         return JsonResponse({"status": "error", "error": "Method not allowed"}, status=405)
-
     try:
         raw      = ChatSession.collection.filter("user_uid", "==", user_uid).fetch()
         sessions = [s.to_dict() for s in raw]
@@ -162,29 +296,23 @@ def list_sessions(request, user_uid: str):
 
 @csrf_exempt
 def delete_session(request, chat_id: str):
-    """
-    DELETE /api/chat/sessions/<chat_id>/
-
-    Deletes the session and ALL messages belonging to it.
-    """
+    """DELETE /api/chat/sessions/<chat_id>/delete"""
     if request.method != "DELETE":
         return JsonResponse({"status": "error", "error": "Method not allowed"}, status=405)
-
     try:
         session = _get_session(chat_id)
     except LookupError as e:
         return JsonResponse({"status": "error", "error": str(e)}, status=404)
 
     try:
-        # Delete all messages first
-        msgs = Message.collection.filter("chat_id", "==", chat_id).fetch()
+        db    = firestore.client()
+        batch = db.batch()
         deleted_msgs = 0
-        for msg in msgs:
-            msg.delete()
+        for doc in _msg_col(chat_id).stream():
+            batch.delete(doc.reference)
             deleted_msgs += 1
-
-        session.delete()
-        logger.info(f"delete_session: removed session {chat_id} + {deleted_msgs} messages")
+        batch.delete(db.collection("chat_sessions").document(chat_id))
+        batch.commit()
         return JsonResponse(
             {"status": "success", "message": f"Session and {deleted_msgs} message(s) deleted"},
             status=200,
@@ -196,13 +324,9 @@ def delete_session(request, chat_id: str):
 
 @csrf_exempt
 def rename_session(request, chat_id: str):
-    """
-    PATCH /api/chat/sessions/<chat_id>/title/
-    Body: { "title": "New title" }
-    """
+    """PATCH /api/chat/sessions/<chat_id>/title/"""
     if request.method != "PATCH":
         return JsonResponse({"status": "error", "error": "Method not allowed"}, status=405)
-
     try:
         body = _parse_body(request)
     except ValueError as e:
@@ -233,25 +357,16 @@ def rename_session(request, chat_id: str):
 
 @csrf_exempt
 def get_messages(request, chat_id: str):
-    """
-    GET /api/chat/sessions/<chat_id>/messages/
-
-    Returns the full message history for a chat session.
-    Messages are sorted oldest → newest (chronological order).
-    Each message has role='user' or role='assistant'.
-    """
+    """GET /api/chat/sessions/<chat_id>/messages/"""
     if request.method != "GET":
         return JsonResponse({"status": "error", "error": "Method not allowed"}, status=405)
-
-    # Verify session exists
     try:
         _get_session(chat_id)
     except LookupError as e:
         return JsonResponse({"status": "error", "error": str(e)}, status=404)
 
     try:
-        history  = _load_history(chat_id)
-        messages = [m.to_dict() for m in history]
+        messages = _load_history(chat_id)
         return JsonResponse({"status": "success", "chat_id": chat_id, "data": messages}, status=200)
     except Exception as e:
         logger.error(f"get_messages: {e}")
@@ -262,16 +377,18 @@ def get_messages(request, chat_id: str):
 def send_message(request, chat_id: str):
     """
     POST /api/chat/sessions/<chat_id>/send/
-    Body: { "message": "What is the AQI today?" }
+    Body: { "message": "Какой сегодня AQI?" }
 
     Flow:
-      1. Validate session exists.
-      2. Load existing message history (for multi-turn context).
-      3. Save the user's message to DB.
-      4. Call the Gemma AI with full history + new message.
-      5. Save the AI reply to DB.
-      6. Auto-title the session on first message.
-      7. Return both messages.
+      1. Validate session.
+      2. Load user profile (location, health, activity).
+      3. Fetch REAL AQI data for user's city (cache → live API).
+      4. Build personalized system prompt.
+      5. Load message history.
+      6. Save user message.
+      7. Inject AQI context into Gemma call.
+      8. Save AI reply.
+      9. Update session.
     """
     if request.method != "POST":
         return JsonResponse({"status": "error", "error": "Method not allowed"}, status=405)
@@ -285,67 +402,72 @@ def send_message(request, chat_id: str):
     if not user_text:
         return JsonResponse({"status": "error", "error": "message is required"}, status=400)
 
-    # ── 1. Verify session ──────────────────────────────────────────────────
+    # ── 1. Validate session ────────────────────────────────────────────────
     try:
         session = _get_session(chat_id)
     except LookupError as e:
         return JsonResponse({"status": "error", "error": str(e)}, status=404)
 
-    # ── 2. Load history ────────────────────────────────────────────────────
-    history = _load_history(chat_id)
+    # ── 2. Load user profile ───────────────────────────────────────────────
+    profile = _get_user_profile(session.user_uid)
+    city    = (profile or {}).get("location", "Dushanbe")
 
-    # ── 3. Build personalized prompt ──────────────────────────────────────
-    system_prompt = _build_system_prompt(session.user_uid)  # ← добавь эту строку
+    # ── 3. Fetch real AQI data for user's city ─────────────────────────────
+    # Runs in background while we do other work
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        aqi_future = executor.submit(_fetch_aqi_data, city)
 
-    # ── 3. Save user message ───────────────────────────────────────────────
-    user_msg = Message(
-        chat_id=chat_id,
-        user_uid=session.user_uid,
-        role="user",
-        content=user_text,
+        # ── 4. Build system prompt ─────────────────────────────────────────
+        system_prompt = _build_system_prompt(profile)
+
+        # ── 5. Load history ────────────────────────────────────────────────
+        history = _load_history(chat_id)
+
+        aqi_data = aqi_future.result()  # wait for AQI
+
+    logger.info(
+        f"send_message: AQI for '{city}' → "
+        f"{aqi_data['aqi'] if aqi_data else 'unavailable'} "
+        f"(source: {aqi_data.get('source', '?') if aqi_data else 'none'})"
     )
-    user_msg.save()
-    logger.info(f"send_message: saved user msg {user_msg.id} in chat {chat_id}")
 
-    # ── 4. Build Gemma payload (full multi-turn history) ───────────────────
+    # ── 6. Save user message ───────────────────────────────────────────────
+    user_msg_dict = _save_message(chat_id, session.user_uid, "user", user_text)
+
+    # ── 7. Build Gemma payload ─────────────────────────────────────────────
+    # AQI context appended to the LAST user message (invisible to the user in UI)
+    aqi_context   = _build_aqi_context(aqi_data)
+    user_text_ctx = user_text + aqi_context
+
     contents = []
     for msg in history:
-        api_role = "model" if msg.role == "assistant" else "user"
-        contents.append({"role": api_role, "parts": [{"text": msg.content}]})
-    # Append current user message
-    contents.append({"role": "user", "parts": [{"text": user_text}]})
+        api_role = "model" if msg["role"] == "assistant" else "user"
+        contents.append({"role": api_role, "parts": [{"text": msg["content"]}]})
+    contents.append({"role": "user", "parts": [{"text": user_text_ctx}]})
 
     ai_text = _call_gemma(contents, system_prompt)
 
-    # ── 5. Save AI reply ───────────────────────────────────────────────────
-    ai_msg = Message(
-        chat_id=chat_id,
-        user_uid=session.user_uid,
-        role="assistant",
-        content=ai_text,
-    )
-    ai_msg.save()
-    logger.info(f"send_message: saved AI msg {ai_msg.id} in chat {chat_id}")
+    # ── 8. Save AI reply ───────────────────────────────────────────────────
+    ai_msg_dict = _save_message(chat_id, session.user_uid, "assistant", ai_text)
 
-    # ── 6. Auto-title on first message, update timestamp ──────────────────
+    # ── 9. Auto-title + update session timestamp ───────────────────────────
     if session.title == "New Chat" and not history:
         session.title = user_text[:60] + ("…" if len(user_text) > 60 else "")
-
     session.updated_at = timezone.now()
     try:
         session.update()
     except Exception as e:
         logger.warning(f"send_message — session.update() failed: {e}")
 
-    # ── 7. Return both saved messages ──────────────────────────────────────
     return JsonResponse(
         {
-            "status": "success",
+            "status":  "success",
             "chat_id": chat_id,
             "data": {
-                "user_message":  user_msg.to_dict(),
-                "ai_message":    ai_msg.to_dict(),
+                "user_message":  user_msg_dict,
+                "ai_message":    ai_msg_dict,
                 "session_title": session.title,
+                "aqi_used":      aqi_data,   # для отладки, можно убрать
             },
         },
         status=200,
@@ -356,63 +478,42 @@ def send_message(request, chat_id: str):
 #  AI INTEGRATION
 # ══════════════════════════════════════════════════════════════════════════════
 
-    
 def _call_gemma(contents: list, system_prompt: str) -> str:
     url = (
         f"https://generativelanguage.googleapis.com/v1beta"
         f"/models/{settings.GEMMA4_MODEL}:generateContent"
     )
-    
-    logger.info(f"_call_gemma: using system_prompt with {len(system_prompt)} chars")
-    
-    # Prepend system prompt as first user message to ensure context is always included
+
     enriched_contents = [
-        {"role": "user", "parts": [{"text": system_prompt}]},
-        {"role": "model", "parts": [{"text": "Understood. I will personalize my responses based on the profile information provided."}]},
+        {"role": "user",  "parts": [{"text": system_prompt}]},
+        {"role": "model", "parts": [{"text": "Understood. I will use the real-time data provided and personalize my responses."}]},
     ] + contents
-    
+
     payload = {
         "contents": enriched_contents,
-        "generationConfig": {
-            "maxOutputTokens": 500,  
-            "temperature": 0.7,
-        },
+        "generationConfig": {"maxOutputTokens": 500, "temperature": 0.7},
     }
 
     def _extract_text(resp_json: dict) -> str:
         try:
             parts = resp_json["candidates"][0]["content"]["parts"]
-
-            # Собираем весь текст из всех частей
-            full_text = ""
-            for part in parts:
-                if not part.get("thought", False) and part.get("text", "").strip():
-                    full_text += part["text"].strip()
-
+            full_text = "".join(
+                p["text"].strip()
+                for p in parts
+                if not p.get("thought", False) and p.get("text", "").strip()
+            )
             if not full_text:
-                return "Извините, не удалось получить ответ."
-
-            # Модель пишет финальный ответ в самом конце после всех размышлений
-            # Берём последний непустой абзац
-            paragraphs = [p.strip() for p in full_text.split("\n") if p.strip()]
-            
-            # Пропускаем строки с маркерами размышлений (* - •)
+                return "Sorry, could not get a response."
             clean_lines = [
-                line for line in paragraphs
-                if not line.startswith(("*", "-", "•", "#"))
+                line for line in full_text.splitlines()
+                if line.strip() and not line.strip().startswith(("*", "-", "•", "#"))
             ]
-
-            if clean_lines:
-                return clean_lines[-1]  # последний чистый абзац = финальный ответ
-
-            return paragraphs[-1]  # fallback — просто последняя строка
-
-        except (KeyError, IndexError) as e:
-            logger.error(f"_call_gemma: unexpected response format: {resp_json}")
-            return "Извините, не удалось получить ответ."
+            return "\n".join(clean_lines) if clean_lines else full_text.strip()
+        except (KeyError, IndexError):
+            logger.error(f"_call_gemma: unexpected format: {resp_json}")
+            return "Sorry, could not get a response."
 
     try:
-        logger.info(f"_call_gemma: sending request with enriched context")
         response = requests.post(
             url,
             params={"key": settings.GEMMA4_API_KEY},
@@ -420,15 +521,10 @@ def _call_gemma(contents: list, system_prompt: str) -> str:
             timeout=(10, 60),
         )
         response.raise_for_status()
-        logger.info(f"_call_gemma: got response, extracting text")
-        result = _extract_text(response.json())
-        logger.info(f"_call_gemma: success, returning response")
-        return result
-
+        return _extract_text(response.json())
     except requests.exceptions.Timeout:
-        logger.error("_call_gemma: request timed out")
-        return "Извините, запрос занял слишком много времени. Попробуйте ещё раз."
-
+        logger.error("_call_gemma: timeout")
+        return "Sorry, the request timed out. Please try again."
     except Exception as e:
         logger.error(f"_call_gemma failed ({type(e).__name__}): {e}")
-        return "Извините, не удалось обработать запрос. Попробуйте ещё раз."
+        return "Sorry, could not process the request. Please try again."
