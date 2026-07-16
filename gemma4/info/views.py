@@ -14,6 +14,7 @@ env_path = Path(__file__).resolve().parent.parent.parent / '.env.local'
 load_dotenv(dotenv_path=env_path)
 
 OPENWEATHERMAP_API_KEY = os.getenv('OPENWEATHERMAP_API_KEY')
+AIRVISUAL_API_KEY = os.getenv('AIRVISUAL_API_KEY', '')
 
 DUSHANBE_LAT = 38.5598
 DUSHANBE_LON = 68.7738
@@ -43,11 +44,11 @@ TAJIK_CITIES = {
     "Baljuvon":    {"lat": 38.1900, "lon": 69.6600},
 }
 
-import requests
 def get_aqi_by_coords(lat, lon):
-    token = "b70c70c5-4398-46ef-97f1-0e6b82b9b128"
+    if not AIRVISUAL_API_KEY:
+        return None
     try:
-        url = f"https://api.airvisual.com/v2/nearest_city?lat={lat}&lon={lon}&key={token}"
+        url = f"https://api.airvisual.com/v2/nearest_city?lat={lat}&lon={lon}&key={AIRVISUAL_API_KEY}"
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()

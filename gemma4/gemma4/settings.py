@@ -45,7 +45,7 @@ try:
     if not firebase_admin._apps:
         cred = credentials.Certificate(FIREBASE_KEY_PATH)
         firebase_admin.initialize_app(cred)
-        print("✓ Firebase Admin SDK initialized")
+        print("Firebase Admin SDK initialized")
 except Exception as e:
     print(f"Warning: Firebase Admin SDK initialization failed - {e}")
 

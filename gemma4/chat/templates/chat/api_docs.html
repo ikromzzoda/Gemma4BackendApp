@@ -1,0 +1,985 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chat API Documentation — Gemma 4</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --surface2: #22263a;
+      --border: #2e3250;
+      --text: #e2e8f0;
+      --muted: #8892b0;
+      --accent: #7c83ff;
+      --accent-dim: #3d4299;
+      --green: #4ade80;
+      --yellow: #fbbf24;
+      --red: #f87171;
+      --blue: #60a5fa;
+      --orange: #fb923c;
+      --purple: #c084fc;
+      --tag-get: #1a4731;
+      --tag-get-text: #4ade80;
+      --tag-post: #1a2e4a;
+      --tag-post-text: #60a5fa;
+      --tag-delete: #4a1a1a;
+      --tag-delete-text: #f87171;
+      --tag-patch: #3a2a1a;
+      --tag-patch-text: #fb923c;
+      --code-bg: #12151f;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Inter', sans-serif;
+      line-height: 1.6;
+      font-size: 14px;
+    }
+
+    /* ── Layout ── */
+    .layout { display: flex; min-height: 100vh; }
+    .sidebar {
+      width: 260px;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow-y: auto;
+      flex-shrink: 0;
+    }
+    .main { flex: 1; padding: 40px 48px; max-width: 900px; }
+
+    /* ── Sidebar ── */
+    .sidebar-logo {
+      padding: 24px 20px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .sidebar-logo h1 { font-size: 16px; color: var(--accent); font-weight: 700; letter-spacing: .5px; }
+    .sidebar-logo p  { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .sidebar-section { padding: 16px 0 8px; }
+    .sidebar-label {
+      padding: 0 20px 8px;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 1.2px;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .sidebar-link {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 20px;
+      text-decoration: none;
+      color: var(--muted);
+      font-size: 13px;
+      transition: background .15s, color .15s;
+      border-left: 2px solid transparent;
+    }
+    .sidebar-link:hover {
+      background: var(--surface2);
+      color: var(--text);
+    }
+    .sidebar-link.active {
+      color: var(--accent);
+      border-left-color: var(--accent);
+      background: var(--surface2);
+    }
+    .method-badge {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 4px;
+      letter-spacing: .3px;
+      min-width: 48px;
+      text-align: center;
+    }
+    .GET    { background: var(--tag-get);    color: var(--tag-get-text); }
+    .POST   { background: var(--tag-post);   color: var(--tag-post-text); }
+    .DELETE { background: var(--tag-delete); color: var(--tag-delete-text); }
+    .PATCH  { background: var(--tag-patch);  color: var(--tag-patch-text); }
+
+    /* ── Header ── */
+    .page-header { margin-bottom: 48px; }
+    .page-header h1 {
+      font-size: 32px;
+      font-weight: 800;
+      background: linear-gradient(135deg, var(--accent), #a78bfa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .page-header p { color: var(--muted); margin-top: 8px; font-size: 15px; }
+    .badges { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+    .badge {
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      border: 1px solid;
+    }
+    .badge-version { border-color: var(--accent); color: var(--accent); }
+    .badge-base    { border-color: var(--border);  color: var(--muted);  background: var(--surface); }
+
+    /* ── Section ── */
+    .section { margin-bottom: 56px; }
+    .section-title {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 20px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .section-title .icon { font-size: 18px; }
+
+    /* ── Endpoint card ── */
+    .endpoint {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      margin-bottom: 20px;
+      overflow: hidden;
+    }
+    .endpoint-header {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 16px 20px;
+      cursor: pointer;
+      user-select: none;
+      transition: background .15s;
+    }
+    .endpoint-header:hover { background: var(--surface2); }
+    .endpoint-path {
+      font-family: 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 14px;
+      color: var(--text);
+      flex: 1;
+    }
+    .endpoint-summary { color: var(--muted); font-size: 13px; }
+    .endpoint-chevron { color: var(--muted); transition: transform .2s; margin-left: auto; }
+    .endpoint.open .endpoint-chevron { transform: rotate(180deg); }
+    .endpoint-body {
+      display: none;
+      padding: 0 20px 20px;
+      border-top: 1px solid var(--border);
+    }
+    .endpoint.open .endpoint-body { display: block; }
+
+    /* ── Tables ── */
+    .param-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0;
+      font-size: 13px;
+    }
+    .param-table th {
+      text-align: left;
+      padding: 8px 12px;
+      background: var(--surface2);
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .8px;
+    }
+    .param-table td {
+      padding: 10px 12px;
+      border-top: 1px solid var(--border);
+      vertical-align: top;
+    }
+    .param-table td:first-child code { color: var(--accent); font-size: 13px; }
+    .required { color: var(--red); font-size: 11px; font-weight: 600; }
+    .optional { color: var(--muted); font-size: 11px; }
+
+    /* ── Code blocks ── */
+    .code-block {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      font-family: 'Fira Code', 'Cascadia Code', 'Courier New', monospace;
+      font-size: 12.5px;
+      overflow-x: auto;
+      line-height: 1.7;
+      margin: 10px 0;
+    }
+    .code-block .kw   { color: #c084fc; }
+    .code-block .str  { color: #4ade80; }
+    .code-block .num  { color: #fb923c; }
+    .code-block .key  { color: #60a5fa; }
+    .code-block .cmt  { color: #4a5568; }
+    .code-block .bool { color: #fbbf24; }
+    .code-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .8px;
+      margin: 16px 0 6px;
+    }
+
+    /* ── Response pills ── */
+    .response-list { margin: 8px 0; }
+    .response-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .response-item:last-child { border-bottom: none; }
+    .status-code {
+      font-family: monospace;
+      font-size: 13px;
+      font-weight: 700;
+      min-width: 40px;
+    }
+    .s200 { color: var(--green); }
+    .s201 { color: var(--green); }
+    .s400 { color: var(--yellow); }
+    .s404 { color: var(--orange); }
+    .s405 { color: var(--orange); }
+    .s500 { color: var(--red); }
+    .response-desc { color: var(--muted); font-size: 13px; flex: 1; }
+
+    /* ── Divider labels ── */
+    h4.sub { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase;
+             letter-spacing: .8px; margin: 20px 0 8px; }
+
+    /* ── Info box ── */
+    .info-box {
+      background: var(--surface2);
+      border-left: 3px solid var(--accent);
+      border-radius: 0 8px 8px 0;
+      padding: 12px 16px;
+      font-size: 13px;
+      color: var(--muted);
+      margin: 16px 0;
+    }
+    .info-box strong { color: var(--text); }
+
+    /* ── Schema ── */
+    .schema-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 700px) { .schema-grid { grid-template-columns: 1fr; } }
+    .schema-card {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px;
+    }
+    .schema-card h5 { font-size: 12px; color: var(--accent); margin-bottom: 8px; font-weight: 700; }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  </style>
+</head>
+<body>
+<div class="layout">
+
+  <!-- ═══════════════════════ SIDEBAR ═══════════════════════ -->
+  <nav class="sidebar">
+    <div class="sidebar-logo">
+      <h1>Gemma 4 API</h1>
+      <p>Chat Endpoints · v1</p>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Overview</div>
+      <a href="#overview" class="sidebar-link active">Introduction</a>
+      <a href="#models" class="sidebar-link">Data Models</a>
+      <a href="#errors" class="sidebar-link">Error Format</a>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Sessions</div>
+      <a href="#create-session" class="sidebar-link">
+        <span class="method-badge POST">POST</span> Create Session
+      </a>
+      <a href="#list-sessions" class="sidebar-link">
+        <span class="method-badge GET">GET</span> List Sessions
+      </a>
+      <a href="#delete-session" class="sidebar-link">
+        <span class="method-badge DELETE">DELETE</span> Delete Session
+      </a>
+      <a href="#rename-session" class="sidebar-link">
+        <span class="method-badge PATCH">PATCH</span> Rename Session
+      </a>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Messages</div>
+      <a href="#get-messages" class="sidebar-link">
+        <span class="method-badge GET">GET</span> Get Messages
+      </a>
+      <a href="#send-message" class="sidebar-link">
+        <span class="method-badge POST">POST</span> Send Message
+      </a>
+    </div>
+  </nav>
+
+  <!-- ═══════════════════════ MAIN ═══════════════════════ -->
+  <main class="main">
+
+    <!-- Header -->
+    <div class="page-header" id="overview">
+      <h1>Chat API</h1>
+      <p>AI-powered chat with real-time air quality context — powered by Gemma 4</p>
+      <div class="badges">
+        <span class="badge badge-version">v1.0</span>
+        <span class="badge badge-base">Base URL: /api/chat/</span>
+        <span class="badge badge-base">Format: JSON</span>
+        <span class="badge badge-base">Auth: Firebase ID token (Bearer)</span>
+        <a class="badge badge-base" href="/api/chat/swagger/">Swagger UI →</a>
+      </div>
+    </div>
+
+    <!-- ═══════ Overview ═══════ -->
+    <div class="section">
+      <h2 class="section-title"><span class="icon">ℹ</span> How it works</h2>
+      <div class="info-box">
+        <strong>Authentication — required on every endpoint</strong><br>
+        Pass a Firebase ID token in the <code>Authorization: Bearer &lt;id_token&gt;</code> header.
+        Requests without a valid token get <code>401</code>. A session (and its messages) can only
+        be read, modified or deleted by its owner — anyone else gets <code>403</code>.
+        On <code>POST /sessions/</code> the <code>user_uid</code> is taken from the token,
+        not from the request body. If Gemma is unavailable, <code>/send/</code> returns
+        <code>502</code> and nothing is saved, so the request can be safely retried.
+      </div>
+      <div class="info-box">
+        <strong>AI limits</strong><br>
+        A single AI reply is capped at <code>1000</code> output tokens. Each user has a daily
+        quota of <code>10&nbsp;000</code> output tokens; when it is exhausted <code>/send/</code>
+        returns <code>429</code> with <code>tokens_used_today</code> and <code>daily_limit</code>
+        fields. The counter resets at midnight UTC.
+      </div>
+      <div class="info-box">
+        <strong>AI Assistant — Airi</strong><br>
+        Every message is processed by the Gemma 4 model. The assistant automatically injects
+        real-time AQI data for the user's city (from Firestore cache or live API calls to
+        AirVisual + OpenWeatherMap). User profile data (name, health condition, activity level)
+        personalises the system prompt on each request.
+      </div>
+      <div class="info-box">
+        <strong>Session → Messages hierarchy</strong><br>
+        A <em>session</em> is a named conversation container stored in
+        <code>chat_sessions/{chat_id}</code>. All messages live in its subcollection
+        <code>chat_sessions/{chat_id}/messages/{message_id}</code> and are ordered by
+        <code>created_at</code>.
+      </div>
+      <div class="info-box">
+        <strong>Auto-title</strong><br>
+        When the first message is sent to a session whose title is still "New Chat",
+        the title is automatically set to the first 60 characters of the user message.
+      </div>
+    </div>
+
+    <!-- ═══════ Data Models ═══════ -->
+    <div class="section" id="models">
+      <h2 class="section-title"><span class="icon">🗂</span> Data Models</h2>
+
+      <div class="schema-grid">
+        <div class="schema-card">
+          <h5>ChatSession</h5>
+          <div class="code-block">
+<span class="key">"chat_id"</span>:    <span class="str">"abc123"</span>,
+<span class="key">"user_uid"</span>:   <span class="str">"firebase-uid"</span>,
+<span class="key">"title"</span>:      <span class="str">"New Chat"</span>,
+<span class="key">"created_at"</span>: <span class="str">"2026-06-15 10:00:00+05:00"</span>,
+<span class="key">"updated_at"</span>: <span class="str">"2026-06-15 10:05:00+05:00"</span>
+          </div>
+        </div>
+        <div class="schema-card">
+          <h5>Message</h5>
+          <div class="code-block">
+<span class="key">"id"</span>:         <span class="str">"uuid-v4"</span>,
+<span class="key">"chat_id"</span>:    <span class="str">"abc123"</span>,
+<span class="key">"role"</span>:       <span class="str">"user"</span> <span class="cmt">| "assistant"</span>,
+<span class="key">"content"</span>:    <span class="str">"What is the AQI today?"</span>,
+<span class="key">"created_at"</span>: <span class="str">"2026-06-15 10:05:00+05:00"</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="schema-card" style="margin-top:12px">
+        <h5>AQI Context (included in send_message response for debugging)</h5>
+        <div class="code-block">
+<span class="key">"city"</span>:      <span class="str">"Dushanbe"</span>,
+<span class="key">"aqi"</span>:       <span class="num">87</span>,
+<span class="key">"aqi_label"</span>: <span class="str">"Moderate"</span>,
+<span class="key">"pm25"</span>:      <span class="num">24.5</span>,
+<span class="key">"pm10"</span>:      <span class="num">38.2</span>,
+<span class="key">"no2"</span>:       <span class="num">12.1</span>,
+<span class="key">"o3"</span>:        <span class="num">55.0</span>,
+<span class="key">"so2"</span>:       <span class="num">4.3</span>,
+<span class="key">"co"</span>:        <span class="num">210.0</span>,
+<span class="key">"source"</span>:    <span class="str">"cache"</span> <span class="cmt">| "live"</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════ Error format ═══════ -->
+    <div class="section" id="errors">
+      <h2 class="section-title"><span class="icon">⚠</span> Error Response Format</h2>
+      <p style="color:var(--muted);margin-bottom:12px">All errors return the same envelope shape:</p>
+      <div class="code-block">
+{
+  <span class="key">"status"</span>: <span class="str">"error"</span>,
+  <span class="key">"error"</span>:  <span class="str">"Human-readable message"</span>
+}
+      </div>
+      <div class="response-list" style="margin-top:16px">
+        <div class="response-item">
+          <span class="status-code s400">400</span>
+          <span class="response-desc">Bad Request — missing required field or invalid JSON body</span>
+        </div>
+        <div class="response-item">
+          <span class="status-code s404">404</span>
+          <span class="response-desc">Not Found — session with the given <code>chat_id</code> does not exist</span>
+        </div>
+        <div class="response-item">
+          <span class="status-code s405">405</span>
+          <span class="response-desc">Method Not Allowed — wrong HTTP verb used</span>
+        </div>
+        <div class="response-item">
+          <span class="status-code s500">500</span>
+          <span class="response-desc">Internal Server Error — Firestore or AI API failure</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════════
+         SESSIONS
+    ══════════════════════════════════════════════════════════ -->
+    <div class="section">
+      <h2 class="section-title"><span class="icon">💬</span> Sessions</h2>
+
+      <!-- CREATE SESSION -->
+      <div class="endpoint open" id="create-session">
+        <div class="endpoint-header" onclick="toggle(this)">
+          <span class="method-badge POST">POST</span>
+          <span class="endpoint-path">/api/chat/sessions/</span>
+          <span class="endpoint-summary">Create a new chat session</span>
+          <span class="endpoint-chevron">▾</span>
+        </div>
+        <div class="endpoint-body">
+          <p style="color:var(--muted);margin-top:12px">
+            Creates a new <code>ChatSession</code> document in Firestore and returns it.
+            Use the returned <code>chat_id</code> for all subsequent message requests.
+          </p>
+
+          <h4 class="sub">Request Body (JSON)</h4>
+          <table class="param-table">
+            <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr>
+              <td><code>title</code></td>
+              <td>string</td>
+              <td><span class="optional">Optional</span></td>
+              <td>Session title. Defaults to <code>"New Chat"</code>. The session owner (<code>user_uid</code>) is taken from the Firebase token</td>
+            </tr>
+          </table>
+
+          <div class="code-label">Request Example</div>
+          <div class="code-block">
+<span class="kw">POST</span> /api/chat/sessions/
+Authorization: Bearer &lt;firebase_id_token&gt;
+Content-Type: application/json
+
+{
+  <span class="key">"title"</span>: <span class="str">"Air Quality Questions"</span>
+}
+          </div>
+
+          <h4 class="sub">Responses</h4>
+          <div class="response-list">
+            <div class="response-item">
+              <span class="status-code s201">201</span>
+              <span class="response-desc">Session created successfully</span>
+            </div>
+            <div class="response-item">
+              <span class="status-code s400">400</span>
+              <span class="response-desc">Invalid JSON body</span>
+            </div>
+            <div class="response-item">
+              <span class="status-code s405">405</span>
+              <span class="response-desc">Non-POST request</span>
+            </div>
+          </div>
+
+          <div class="code-label">Response 201</div>
+          <div class="code-block">
+{
+  <span class="key">"status"</span>: <span class="str">"success"</span>,
+  <span class="key">"data"</span>: {
+    <span class="key">"chat_id"</span>:    <span class="str">"xKpL9mNqRt"</span>,
+    <span class="key">"user_uid"</span>:   <span class="str">"abc123uid"</span>,
+    <span class="key">"title"</span>:      <span class="str">"Air Quality Questions"</span>,
+    <span class="key">"created_at"</span>: <span class="str">"2026-06-15 10:00:00.000000+05:00"</span>,
+    <span class="key">"updated_at"</span>: <span class="bool">null</span>
+  }
+}
+          </div>
+        </div>
+      </div>
+
+      <!-- LIST SESSIONS -->
+      <div class="endpoint" id="list-sessions">
+        <div class="endpoint-header" onclick="toggle(this)">
+          <span class="method-badge GET">GET</span>
+          <span class="endpoint-path">/api/chat/users/&lt;user_uid&gt;/sessions/</span>
+          <span class="endpoint-summary">List all sessions for a user</span>
+          <span class="endpoint-chevron">▾</span>
+        </div>
+        <div class="endpoint-body">
+          <p style="color:var(--muted);margin-top:12px">
+            Returns all chat sessions belonging to the given <code>user_uid</code>,
+            sorted by <code>updated_at</code> descending (most recent first).
+          </p>
+
+          <h4 class="sub">Path Parameters</h4>
+          <table class="param-table">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr>
+              <td><code>user_uid</code></td>
+              <td>string</td>
+              <td>Firebase Auth UID of the user</td>
+            </tr>
+          </table>
+
+          <div class="code-label">Request Example</div>
+          <div class="code-block">
+<span class="kw">GET</span> /api/chat/users/abc123uid/sessions/
+          </div>
+
+          <h4 class="sub">Responses</h4>
+          <div class="response-list">
+            <div class="response-item">
+              <span class="status-code s200">200</span>
+              <span class="response-desc">Array of sessions (empty array if none)</span>
+            </div>
+            <div class="response-item">
+              <span class="status-code s405">405</span>
+              <span class="response-desc">Non-GET request</span>
+            </div>
+          </div>
+
+          <div class="code-label">Response 200</div>
+          <div class="code-block">
+{
+  <span class="key">"status"</span>: <span class="str">"success"</span>,
+  <span class="key">"data"</span>: [
+    {
+      <span class="key">"chat_id"</span>:    <span class="str">"xKpL9mNqRt"</span>,
+      <span class="key">"user_uid"</span>:   <span class="str">"abc123uid"</span>,
+      <span class="key">"title"</span>:      <span class="str">"Какой сегодня AQI?"</span>,
+      <span class="key">"created_at"</span>: <span class="str">"2026-06-15 10:00:00.000000+05:00"</span>,
+      <span class="key">"updated_at"</span>: <span class="str">"2026-06-15 10:05:00.000000+05:00"</span>
+    },
+    {
+      <span class="key">"chat_id"</span>:    <span class="str">"yZrM2pQsWu"</span>,
+      <span class="key">"user_uid"</span>:   <span class="str">"abc123uid"</span>,
+      <span class="key">"title"</span>:      <span class="str">"New Chat"</span>,
+      <span class="key">"created_at"</span>: <span class="str">"2026-06-14 08:30:00.000000+05:00"</span>,
+      <span class="key">"updated_at"</span>: <span class="bool">null</span>
+    }
+  ]
+}
+          </div>
+        </div>
+      </div>
+
+      <!-- DELETE SESSION -->
+      <div class="endpoint" id="delete-session">
+        <div class="endpoint-header" onclick="toggle(this)">
+          <span class="method-badge DELETE">DELETE</span>
+          <span class="endpoint-path">/api/chat/sessions/&lt;chat_id&gt;/delete</span>
+          <span class="endpoint-summary">Delete session and all its messages</span>
+          <span class="endpoint-chevron">▾</span>
+        </div>
+        <div class="endpoint-body">
+          <p style="color:var(--muted);margin-top:12px">
+            Permanently deletes the session document and all messages in its subcollection
+            using a Firestore batch operation. This action is <strong style="color:var(--red)">irreversible</strong>.
+          </p>
+
+          <h4 class="sub">Path Parameters</h4>
+          <table class="param-table">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr>
+              <td><code>chat_id</code></td>
+              <td>string</td>
+              <td>The session ID (value of <code>chat_id</code> field)</td>
+            </tr>
+          </table>
+
+          <div class="code-label">Request Example</div>
+          <div class="code-block">
+<span class="kw">DELETE</span> /api/chat/sessions/xKpL9mNqRt/delete
+          </div>
+
+          <h4 class="sub">Responses</h4>
+          <div class="response-list">
+            <div class="response-item">
+              <span class="status-code s200">200</span>
+              <span class="response-desc">Session and all messages deleted</span>
+            </div>
+            <div class="response-item">
+              <span class="status-code s404">404</span>
+              <span class="response-desc">Session not found</span>
+            </div>
+            <div class="response-item">
+              <span class="status-code s405">405</span>
+              <span class="response-desc">Non-DELETE request</span>
+            </div>
+          </div>
+
+          <div class="code-label">Response 200</div>
+          <div class="code-block">
+{
+  <span class="key">"status"</span>:  <span class="str">"success"</span>,
+  <span class="key">"message"</span>: <span class="str">"Session and 12 message(s) deleted"</span>
+}
+          </div>
+
+          <div class="code-label">Response 404</div>
+          <div class="code-block">
+{
+  <span class="key">"status"</span>: <span class="str">"error"</span>,
+  <span class="key">"error"</span>:  <span class="str">"Session not found"</span>
+}
+          </div>
+        </div>
+      </div>
+
+      <!-- RENAME SESSION -->
+      <div class="endpoint" id="rename-session">
+        <div class="endpoint-header" onclick="toggle(this)">
+          <span class="method-badge PATCH">PATCH</span>
+          <span class="endpoint-path">/api/chat/sessions/&lt;chat_id&gt;/title/</span>
+          <span class="endpoint-summary">Rename session title</span>
+          <span class="endpoint-chevron">▾</span>
+        </div>
+        <div class="endpoint-body">
+          <p style="color:var(--muted);margin-top:12px">
+            Updates the <code>title</code> field of a session and sets <code>updated_at</code>
+            to the current time.
+          </p>
+
+          <h4 class="sub">Path Parameters</h4>
+          <table class="param-table">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr>
+              <td><code>chat_id</code></td>
+              <td>string</td>
+              <td>The session ID</td>
+            </tr>
+          </table>
+
+          <h4 class="sub">Request Body (JSON)</h4>
+          <table class="param-table">
+            <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr>
+              <td><code>title</code></td>
+              <td>string</td>
+              <td><span class="required">Required</span></td>
+              <td>New title for the session (must be non-empty)</td>
+            </tr>
+          </table>
+
+          <div class="code-label">Request Example</div>
+          <div class="code-block">
+<span class="kw">PATCH</span> /api/chat/sessions/xKpL9mNqRt/title/
+Content-Type: application/json
+
+{
+  <span class="key">"title"</span>: <span class="str">"Dushanbe Air Quality"</span>
+}
+          </div>
+
+          <h4 class="sub">Responses</h4>
+          <div class="response-list">
+            <div class="response-item">
+              <span class="status-code s200">200</span>
+              <span class="response-desc">Updated session object</span>
+            </div>
+            <div class="response-item">
+              <span class="status-code s400">400</span>
+              <span class="response-desc"><code>title</code> is missing or empty</span>
+            </div>
+            <div class="response-item">
+              <span class="status-code s404">404</span>
+              <span class="response-desc">Session not found</span>
+            </div>
+          </div>
+
+          <div class="code-label">Response 200</div>
+          <div class="code-block">
+{
+  <span class="key">"status"</span>: <span class="str">"success"</span>,
+  <span class="key">"data"</span>: {
+    <span class="key">"chat_id"</span>:    <span class="str">"xKpL9mNqRt"</span>,
+    <span class="key">"user_uid"</span>:   <span class="str">"abc123uid"</span>,
+    <span class="key">"title"</span>:      <span class="str">"Dushanbe Air Quality"</span>,
+    <span class="key">"created_at"</span>: <span class="str">"2026-06-15 10:00:00.000000+05:00"</span>,
+    <span class="key">"updated_at"</span>: <span class="str">"2026-06-15 10:10:00.000000+05:00"</span>
+  }
+}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════════
+         MESSAGES
+    ══════════════════════════════════════════════════════════ -->
+    <div class="section">
+      <h2 class="section-title"><span class="icon">📨</span> Messages</h2>
+
+      <!-- GET MESSAGES -->
+      <div class="endpoint" id="get-messages">
+        <div class="endpoint-header" onclick="toggle(this)">
+          <span class="method-badge GET">GET</span>
+          <span class="endpoint-path">/api/chat/sessions/&lt;chat_id&gt;/messages/</span>
+          <span class="endpoint-summary">Retrieve full message history</span>
+          <span class="endpoint-chevron">▾</span>
+        </div>
+        <div class="endpoint-body">
+          <p style="color:var(--muted);margin-top:12px">
+            Returns all messages for the session, ordered oldest → newest by <code>created_at</code>.
+            Validates the session exists before reading messages.
+          </p>
+
+          <h4 class="sub">Path Parameters</h4>
+          <table class="param-table">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr>
+              <td><code>chat_id</code></td>
+              <td>string</td>
+              <td>The session ID</td>
+            </tr>
+          </table>
+
+          <div class="code-label">Request Example</div>
+          <div class="code-block">
+<span class="kw">GET</span> /api/chat/sessions/xKpL9mNqRt/messages/
+          </div>
+
+          <h4 class="sub">Responses</h4>
+          <div class="response-list">
+            <div class="response-item">
+              <span class="status-code s200">200</span>
+              <span class="response-desc">Ordered array of message objects</span>
+            </div>
+            <div class="response-item">
+              <span class="status-code s404">404</span>
+              <span class="response-desc">Session not found</span>
+            </div>
+            <div class="response-item">
+              <span class="status-code s405">405</span>
+              <span class="response-desc">Non-GET request</span>
+            </div>
+          </div>
+
+          <div class="code-label">Response 200</div>
+          <div class="code-block">
+{
+  <span class="key">"status"</span>:  <span class="str">"success"</span>,
+  <span class="key">"chat_id"</span>: <span class="str">"xKpL9mNqRt"</span>,
+  <span class="key">"data"</span>: [
+    {
+      <span class="key">"id"</span>:         <span class="str">"3f2a1b9c-8d4e-4f5a-9b1c-2d3e4f5a6b7c"</span>,
+      <span class="key">"chat_id"</span>:    <span class="str">"xKpL9mNqRt"</span>,
+      <span class="key">"role"</span>:       <span class="str">"user"</span>,
+      <span class="key">"content"</span>:    <span class="str">"What is the AQI in Dushanbe today?"</span>,
+      <span class="key">"created_at"</span>: <span class="str">"2026-06-15 10:05:00.000000+05:00"</span>
+    },
+    {
+      <span class="key">"id"</span>:         <span class="str">"9a8b7c6d-5e4f-3a2b-1c0d-e9f8a7b6c5d4"</span>,
+      <span class="key">"chat_id"</span>:    <span class="str">"xKpL9mNqRt"</span>,
+      <span class="key">"role"</span>:       <span class="str">"assistant"</span>,
+      <span class="key">"content"</span>:    <span class="str">"The AQI in Dushanbe right now is 87 (Moderate). PM2.5 is at 24.5 µg/m³. Consider limiting prolonged outdoor activity."</span>,
+      <span class="key">"created_at"</span>: <span class="str">"2026-06-15 10:05:03.000000+05:00"</span>
+    }
+  ]
+}
+          </div>
+        </div>
+      </div>
+
+      <!-- SEND MESSAGE -->
+      <div class="endpoint" id="send-message">
+        <div class="endpoint-header" onclick="toggle(this)">
+          <span class="method-badge POST">POST</span>
+          <span class="endpoint-path">/api/chat/sessions/&lt;chat_id&gt;/send/</span>
+          <span class="endpoint-summary">Send a message and receive AI reply</span>
+          <span class="endpoint-chevron">▾</span>
+        </div>
+        <div class="endpoint-body">
+          <p style="color:var(--muted);margin-top:12px">
+            The main endpoint. Sends a user message to Gemma 4 and returns the AI reply.
+            Automatically fetches live AQI data and injects it into the model context.
+          </p>
+
+          <div class="info-box">
+            <strong>Processing pipeline (in order):</strong><br>
+            1. Validate session →
+            2. Load user profile from Firestore →
+            3. Fetch AQI data for user's city (cache first, then live API) →
+            4. Build personalised system prompt →
+            5. Load full message history →
+            6. Save user message →
+            7. Call Gemma 4 with history + AQI context →
+            8. Save AI reply →
+            9. Update session <code>updated_at</code> + auto-title if first message
+          </div>
+
+          <h4 class="sub">Path Parameters</h4>
+          <table class="param-table">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr>
+              <td><code>chat_id</code></td>
+              <td>string</td>
+              <td>The session ID</td>
+            </tr>
+          </table>
+
+          <h4 class="sub">Request Body (JSON)</h4>
+          <table class="param-table">
+            <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr>
+              <td><code>message</code></td>
+              <td>string</td>
+              <td><span class="required">Required</span></td>
+              <td>The user's message text. Cannot be empty.</td>
+            </tr>
+          </table>
+
+          <div class="code-label">Request Example</div>
+          <div class="code-block">
+<span class="kw">POST</span> /api/chat/sessions/xKpL9mNqRt/send/
+Content-Type: application/json
+
+{
+  <span class="key">"message"</span>: <span class="str">"Какой сегодня AQI в Душанбе?"</span>
+}
+          </div>
+
+          <h4 class="sub">Responses</h4>
+          <div class="response-list">
+            <div class="response-item">
+              <span class="status-code s200">200</span>
+              <span class="response-desc">User message saved + AI reply returned</span>
+            </div>
+            <div class="response-item">
+              <span class="status-code s400">400</span>
+              <span class="response-desc"><code>message</code> is empty or JSON is invalid</span>
+            </div>
+            <div class="response-item">
+              <span class="status-code s404">404</span>
+              <span class="response-desc">Session not found</span>
+            </div>
+            <div class="response-item">
+              <span class="status-code s405">405</span>
+              <span class="response-desc">Non-POST request</span>
+            </div>
+          </div>
+
+          <div class="code-label">Response 200</div>
+          <div class="code-block">
+{
+  <span class="key">"status"</span>:        <span class="str">"success"</span>,
+  <span class="key">"chat_id"</span>:       <span class="str">"xKpL9mNqRt"</span>,
+  <span class="key">"data"</span>: {
+    <span class="key">"user_message"</span>: {
+      <span class="key">"id"</span>:         <span class="str">"3f2a1b9c-8d4e-4f5a-9b1c-2d3e4f5a6b7c"</span>,
+      <span class="key">"chat_id"</span>:    <span class="str">"xKpL9mNqRt"</span>,
+      <span class="key">"role"</span>:       <span class="str">"user"</span>,
+      <span class="key">"content"</span>:    <span class="str">"Какой сегодня AQI в Душанбе?"</span>,
+      <span class="key">"created_at"</span>: <span class="str">"2026-06-15 10:05:00.000000+05:00"</span>
+    },
+    <span class="key">"ai_message"</span>: {
+      <span class="key">"id"</span>:         <span class="str">"9a8b7c6d-5e4f-3a2b-1c0d-e9f8a7b6c5d4"</span>,
+      <span class="key">"chat_id"</span>:    <span class="str">"xKpL9mNqRt"</span>,
+      <span class="key">"role"</span>:       <span class="str">"assistant"</span>,
+      <span class="key">"content"</span>:    <span class="str">"AQI в Душанбе сейчас 87 — умеренный уровень загрязнения. PM2.5 составляет 24.5 µg/m³. Рекомендую ограничить длительные прогулки на улице."</span>,
+      <span class="key">"created_at"</span>: <span class="str">"2026-06-15 10:05:03.000000+05:00"</span>
+    },
+    <span class="key">"session_title"</span>: <span class="str">"Какой сегодня AQI в Душанбе?"</span>,
+    <span class="key">"aqi_used"</span>: {
+      <span class="key">"city"</span>:      <span class="str">"Dushanbe"</span>,
+      <span class="key">"aqi"</span>:       <span class="num">87</span>,
+      <span class="key">"aqi_label"</span>: <span class="str">"Moderate"</span>,
+      <span class="key">"pm25"</span>:      <span class="num">24.5</span>,
+      <span class="key">"pm10"</span>:      <span class="num">38.2</span>,
+      <span class="key">"no2"</span>:       <span class="num">12.1</span>,
+      <span class="key">"o3"</span>:        <span class="num">55.0</span>,
+      <span class="key">"so2"</span>:       <span class="num">4.3</span>,
+      <span class="key">"co"</span>:        <span class="num">210.0</span>,
+      <span class="key">"source"</span>:    <span class="str">"cache"</span>
+    }
+  }
+}
+          </div>
+
+          <div class="code-label">Response 400 — empty message</div>
+          <div class="code-block">
+{
+  <span class="key">"status"</span>: <span class="str">"error"</span>,
+  <span class="key">"error"</span>:  <span class="str">"message is required"</span>
+}
+          </div>
+
+          <div class="code-label">Notes on <code>aqi_used</code></div>
+          <div class="info-box">
+            <code>aqi_used</code> shows the exact AQI data injected into the Gemma context for this request.
+            If AQI data was unavailable (API down, unknown city), this field will be <code>null</code>
+            and the assistant will answer without real-time data.
+            This field is intended for debugging — you may hide it in production.
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Footer -->
+    <div style="border-top:1px solid var(--border);padding-top:24px;color:var(--muted);font-size:12px;margin-top:40px">
+      Gemma 4 · Chat API · Generated {{ generated_at }} ·
+      <a href="/admin/" style="color:var(--accent);text-decoration:none">Admin</a>
+    </div>
+
+  </main>
+</div>
+
+<script>
+  function toggle(header) {
+    const card = header.closest('.endpoint');
+    card.classList.toggle('open');
+  }
+
+  // Highlight sidebar link on scroll
+  const sections = document.querySelectorAll('[id]');
+  const links = document.querySelectorAll('.sidebar-link');
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        links.forEach(l => l.classList.remove('active'));
+        const active = document.querySelector(`.sidebar-link[href="#${e.target.id}"]`);
+        if (active) active.classList.add('active');
+      }
+    });
+  }, { rootMargin: '-40% 0px -55% 0px' });
+  sections.forEach(s => observer.observe(s));
+</script>
+</body>
+</html>

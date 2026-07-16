@@ -7,10 +7,12 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.http import JsonResponse
+from django.shortcuts import render
 from django.utils import timezone
 
 from .models import ChatSession
 from django.views.decorators.csrf import csrf_exempt
+from firebase_admin import auth as fb_auth
 from firebase_admin import firestore
 
 # ── Импортируем готовые утилиты из приложения info ─────────────────────────
@@ -23,6 +25,43 @@ from info.views import (
 from info.models import AirPollution
 
 logger = logging.getLogger(__name__)
+
+# Сколько последних сообщений отправляется модели (контекст не растёт бесконечно)
+HISTORY_LIMIT = 30
+
+# Лимит выходных токенов на один ответ модели
+MAX_OUTPUT_TOKENS = 1000
+
+# Дневной лимит выходных токенов модели на одного пользователя
+DAILY_TOKEN_LIMIT = 10000
+
+# Firestore batch поддерживает максимум 500 операций — берём с запасом
+FIRESTORE_BATCH_LIMIT = 450
+
+# Общий пул потоков для параллельных внешних HTTP-запросов
+_EXECUTOR = ThreadPoolExecutor(max_workers=4)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  API DOCS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def api_docs(request):
+    """GET /api/chat/docs/ — interactive API documentation page"""
+    return render(request, "chat/api_docs.html", {
+        "generated_at": timezone.now().strftime("%Y-%m-%d"),
+    })
+
+
+def openapi_spec(request):
+    """GET /api/chat/openapi.json — OpenAPI 3.0 spec (для Swagger UI и кодогенерации)"""
+    from .openapi import OPENAPI_SPEC
+    return JsonResponse(OPENAPI_SPEC)
+
+
+def swagger_ui(request):
+    """GET /api/chat/swagger/ — Swagger UI поверх openapi.json"""
+    return render(request, "chat/swagger.html")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -65,9 +104,20 @@ def _save_message(chat_id: str, user_uid: str, role: str, content: str) -> dict:
     }
 
 
-def _load_history(chat_id: str) -> list[dict]:
-    """Oldest → newest из субколлекции, один запрос."""
-    docs = _msg_col(chat_id).order_by("created_at").stream()
+def _load_history(chat_id: str, limit: int | None = None) -> list[dict]:
+    """
+    Oldest → newest из субколлекции, один запрос.
+    limit=N возвращает только N ПОСЛЕДНИХ сообщений (для контекста модели).
+    """
+    col = _msg_col(chat_id)
+    if limit:
+        docs = list(
+            col.order_by("created_at", direction=firestore.Query.DESCENDING)
+               .limit(limit)
+               .stream()
+        )[::-1]
+    else:
+        docs = col.order_by("created_at").stream()
     return [
         {
             "id": doc.id, "chat_id": chat_id,
@@ -79,7 +129,7 @@ def _load_history(chat_id: str) -> list[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  AQI CONTEXT  ← новый блок
+#  AQI CONTEXT
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _fetch_aqi_data(city: str) -> dict | None:
@@ -99,47 +149,49 @@ def _fetch_aqi_data(city: str) -> dict | None:
     # ── 1. Проверяем кэш в Firestore (последний час) ──────────────────────
     try:
         one_hour_ago = timezone.now() - timedelta(hours=1)
-        records = list(
+        records = (
             AirPollution.collection
             .filter("lat", "==", lat)
             .filter("lon", "==", lon)
             .fetch()
         )
-        if records:
-            records.sort(key=lambda r: r.created_at or "", reverse=True)
-            fresh = records[0]
-            if fresh.created_at and fresh.created_at >= one_hour_ago:
-                logger.info(f"_fetch_aqi_data: cache hit for {city}")
-                return {
-                    "city":      city,
-                    "aqi":       fresh.aqi,
-                    "aqi_label": _aqi_label_us(fresh.aqi),
-                    "pm25":      fresh.pm25,
-                    "pm10":      fresh.pm10,
-                    "no2":       fresh.no2,
-                    "o3":        fresh.o3,
-                    "so2":       fresh.so2,
-                    "co":        fresh.co,
-                    "source":    "cache",
-                }
+        # created_at может быть None — такие записи не участвуют в выборе
+        fresh_records = [
+            r for r in records
+            if r.created_at and r.created_at >= one_hour_ago
+        ]
+        if fresh_records:
+            fresh = max(fresh_records, key=lambda r: r.created_at)
+            logger.info(f"_fetch_aqi_data: cache hit for {city}")
+            return {
+                "city":      city,
+                "aqi":       fresh.aqi,
+                "aqi_label": _aqi_label_us(fresh.aqi),
+                "pm25":      fresh.pm25,
+                "pm10":      fresh.pm10,
+                "no2":       fresh.no2,
+                "o3":        fresh.o3,
+                "so2":       fresh.so2,
+                "co":        fresh.co,
+                "source":    "cache",
+            }
     except Exception as e:
         logger.warning(f"_fetch_aqi_data: Firestore cache error: {e}")
 
     # ── 2. Параллельно запрашиваем AirVisual + OpenWeatherMap ─────────────
     def fetch_owm():
         url = (
-            f"http://api.openweathermap.org/data/2.5/air_pollution"
+            f"https://api.openweathermap.org/data/2.5/air_pollution"
             f"?lat={lat}&lon={lon}&appid={OPENWEATHERMAP_API_KEY}"
         )
         return requests.get(url, timeout=10)
 
     try:
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            aqi_future = executor.submit(get_aqi_by_coords, lat, lon)
-            owm_future = executor.submit(fetch_owm)
+        aqi_future = _EXECUTOR.submit(get_aqi_by_coords, lat, lon)
+        owm_future = _EXECUTOR.submit(fetch_owm)
 
-            aqi   = aqi_future.result()
-            owm_r = owm_future.result()
+        aqi   = aqi_future.result()
+        owm_r = owm_future.result()
 
         owm_r.raise_for_status()
         components = owm_r.json()["list"][0].get("components", {})
@@ -171,7 +223,9 @@ def _build_aqi_context(aqi_data: dict) -> str:
         return ""
 
     def fmt(v):
-        return f"{v:.1f}" if isinstance(v, float) else str(v) if v is not None else "—"
+        if v is None:
+            return "—"
+        return f"{v:.1f}" if isinstance(v, float) else str(v)
 
     return (
         f"\n\n[REAL-TIME AIR QUALITY DATA — use this in your answer, do not mention this block]\n"
@@ -229,8 +283,31 @@ def _build_system_prompt(profile: dict | None) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  REQUEST HELPERS
+#  AUTH + REQUEST HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _auth_uid(request) -> str | None:
+    """
+    Проверяет Firebase ID token из заголовка `Authorization: Bearer <token>`.
+    Возвращает uid пользователя или None, если токен отсутствует/невалиден.
+    """
+    header = request.META.get("HTTP_AUTHORIZATION", "")
+    if not header.startswith("Bearer "):
+        return None
+    try:
+        decoded = fb_auth.verify_id_token(header[len("Bearer "):].strip())
+        return decoded["uid"]
+    except Exception as e:
+        logger.warning(f"_auth_uid: token rejected: {e}")
+        return None
+
+
+def _unauthorized():
+    return JsonResponse(
+        {"status": "error", "error": "Authentication required: pass a Firebase ID token in the Authorization: Bearer header"},
+        status=401,
+    )
+
 
 def _parse_body(request) -> dict:
     try:
@@ -250,33 +327,81 @@ def _get_session(chat_id: str) -> ChatSession:
     return session
 
 
+def _get_owned_session(chat_id: str, uid: str) -> ChatSession:
+    """Session lookup + проверка, что сессия принадлежит владельцу токена."""
+    session = _get_session(chat_id)
+    if session.user_uid != uid:
+        raise PermissionError("Forbidden: session belongs to another user")
+    return session
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  DAILY TOKEN QUOTA
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _usage_doc(user_uid: str):
+    """Документ дневного счётчика: chat_usage/{uid}_{YYYY-MM-DD}"""
+    day = timezone.now().strftime("%Y-%m-%d")
+    db  = firestore.client()
+    return db.collection("chat_usage").document(f"{user_uid}_{day}")
+
+
+def _tokens_used_today(user_uid: str) -> int:
+    try:
+        doc = _usage_doc(user_uid).get()
+        if doc.exists:
+            return doc.to_dict().get("tokens_used", 0)
+    except Exception as e:
+        # при недоступности счётчика не блокируем пользователя
+        logger.warning(f"_tokens_used_today: {e}")
+    return 0
+
+
+def _add_token_usage(user_uid: str, tokens: int) -> None:
+    if tokens <= 0:
+        return
+    try:
+        _usage_doc(user_uid).set(
+            {
+                "user_uid":    user_uid,
+                "date":        timezone.now().strftime("%Y-%m-%d"),
+                "tokens_used": firestore.Increment(tokens),
+                "updated_at":  timezone.now(),
+            },
+            merge=True,
+        )
+    except Exception as e:
+        logger.warning(f"_add_token_usage: {e}")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  SESSION VIEWS
 # ══════════════════════════════════════════════════════════════════════════════
 
 @csrf_exempt
 def create_session(request):
-    """POST /api/chat/sessions/"""
+    """POST /api/chat/sessions/  (user_uid берётся из Firebase-токена)"""
     if request.method != "POST":
         return JsonResponse({"status": "error", "error": "Method not allowed"}, status=405)
+
+    uid = _auth_uid(request)
+    if not uid:
+        return _unauthorized()
+
     try:
         body = _parse_body(request)
     except ValueError as e:
         return JsonResponse({"status": "error", "error": str(e)}, status=400)
 
-    user_uid = body.get("user_uid", "").strip()
-    title    = body.get("title", "New Chat").strip() or "New Chat"
-
-    if not user_uid:
-        return JsonResponse({"status": "error", "error": "user_uid is required"}, status=400)
+    title = body.get("title", "New Chat").strip() or "New Chat"
 
     try:
-        session = ChatSession(user_uid=user_uid, title=title)
+        session = ChatSession(user_uid=uid, title=title)
         session.save()
         return JsonResponse({"status": "success", "data": session.to_dict()}, status=201)
     except Exception as e:
-        logger.error(f"create_session: {e}")
-        return JsonResponse({"status": "error", "error": str(e)}, status=500)
+        logger.error(f"create_session: {e}", exc_info=True)
+        return JsonResponse({"status": "error", "error": "Internal server error"}, status=500)
 
 
 @csrf_exempt
@@ -284,14 +409,21 @@ def list_sessions(request, user_uid: str):
     """GET /api/chat/users/<user_uid>/sessions/"""
     if request.method != "GET":
         return JsonResponse({"status": "error", "error": "Method not allowed"}, status=405)
+
+    uid = _auth_uid(request)
+    if not uid:
+        return _unauthorized()
+    if uid != user_uid:
+        return JsonResponse({"status": "error", "error": "Forbidden"}, status=403)
+
     try:
         raw      = ChatSession.collection.filter("user_uid", "==", user_uid).fetch()
         sessions = [s.to_dict() for s in raw]
         sessions.sort(key=lambda x: x["updated_at"] or x["created_at"] or "", reverse=True)
         return JsonResponse({"status": "success", "data": sessions}, status=200)
     except Exception as e:
-        logger.error(f"list_sessions: {e}")
-        return JsonResponse({"status": "error", "error": str(e)}, status=500)
+        logger.error(f"list_sessions: {e}", exc_info=True)
+        return JsonResponse({"status": "error", "error": "Internal server error"}, status=500)
 
 
 @csrf_exempt
@@ -299,18 +431,32 @@ def delete_session(request, chat_id: str):
     """DELETE /api/chat/sessions/<chat_id>/delete"""
     if request.method != "DELETE":
         return JsonResponse({"status": "error", "error": "Method not allowed"}, status=405)
-    try:
-        session = _get_session(chat_id)
-    except LookupError as e:
-        return JsonResponse({"status": "error", "error": str(e)}, status=404)
+
+    uid = _auth_uid(request)
+    if not uid:
+        return _unauthorized()
 
     try:
-        db    = firestore.client()
-        batch = db.batch()
+        _get_owned_session(chat_id, uid)
+    except LookupError as e:
+        return JsonResponse({"status": "error", "error": str(e)}, status=404)
+    except PermissionError as e:
+        return JsonResponse({"status": "error", "error": str(e)}, status=403)
+
+    try:
+        db = firestore.client()
         deleted_msgs = 0
+        batch = db.batch()
+        ops = 0
+        # Firestore batch ограничен 500 операциями — удаляем чанками
         for doc in _msg_col(chat_id).stream():
             batch.delete(doc.reference)
             deleted_msgs += 1
+            ops += 1
+            if ops >= FIRESTORE_BATCH_LIMIT:
+                batch.commit()
+                batch = db.batch()
+                ops = 0
         batch.delete(db.collection("chat_sessions").document(chat_id))
         batch.commit()
         return JsonResponse(
@@ -318,8 +464,8 @@ def delete_session(request, chat_id: str):
             status=200,
         )
     except Exception as e:
-        logger.error(f"delete_session: {e}")
-        return JsonResponse({"status": "error", "error": str(e)}, status=500)
+        logger.error(f"delete_session: {e}", exc_info=True)
+        return JsonResponse({"status": "error", "error": "Internal server error"}, status=500)
 
 
 @csrf_exempt
@@ -327,6 +473,11 @@ def rename_session(request, chat_id: str):
     """PATCH /api/chat/sessions/<chat_id>/title/"""
     if request.method != "PATCH":
         return JsonResponse({"status": "error", "error": "Method not allowed"}, status=405)
+
+    uid = _auth_uid(request)
+    if not uid:
+        return _unauthorized()
+
     try:
         body = _parse_body(request)
     except ValueError as e:
@@ -337,9 +488,11 @@ def rename_session(request, chat_id: str):
         return JsonResponse({"status": "error", "error": "title is required"}, status=400)
 
     try:
-        session = _get_session(chat_id)
+        session = _get_owned_session(chat_id, uid)
     except LookupError as e:
         return JsonResponse({"status": "error", "error": str(e)}, status=404)
+    except PermissionError as e:
+        return JsonResponse({"status": "error", "error": str(e)}, status=403)
 
     try:
         session.title      = title
@@ -347,8 +500,8 @@ def rename_session(request, chat_id: str):
         session.update()
         return JsonResponse({"status": "success", "data": session.to_dict()}, status=200)
     except Exception as e:
-        logger.error(f"rename_session: {e}")
-        return JsonResponse({"status": "error", "error": str(e)}, status=500)
+        logger.error(f"rename_session: {e}", exc_info=True)
+        return JsonResponse({"status": "error", "error": "Internal server error"}, status=500)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -360,17 +513,24 @@ def get_messages(request, chat_id: str):
     """GET /api/chat/sessions/<chat_id>/messages/"""
     if request.method != "GET":
         return JsonResponse({"status": "error", "error": "Method not allowed"}, status=405)
+
+    uid = _auth_uid(request)
+    if not uid:
+        return _unauthorized()
+
     try:
-        _get_session(chat_id)
+        _get_owned_session(chat_id, uid)
     except LookupError as e:
         return JsonResponse({"status": "error", "error": str(e)}, status=404)
+    except PermissionError as e:
+        return JsonResponse({"status": "error", "error": str(e)}, status=403)
 
     try:
         messages = _load_history(chat_id)
         return JsonResponse({"status": "success", "chat_id": chat_id, "data": messages}, status=200)
     except Exception as e:
-        logger.error(f"get_messages: {e}")
-        return JsonResponse({"status": "error", "error": str(e)}, status=500)
+        logger.error(f"get_messages: {e}", exc_info=True)
+        return JsonResponse({"status": "error", "error": "Internal server error"}, status=500)
 
 
 @csrf_exempt
@@ -380,18 +540,21 @@ def send_message(request, chat_id: str):
     Body: { "message": "Какой сегодня AQI?" }
 
     Flow:
-      1. Validate session.
+      1. Auth + validate session ownership.
       2. Load user profile (location, health, activity).
       3. Fetch REAL AQI data for user's city (cache → live API).
       4. Build personalized system prompt.
-      5. Load message history.
-      6. Save user message.
-      7. Inject AQI context into Gemma call.
-      8. Save AI reply.
-      9. Update session.
+      5. Load last N messages of history.
+      6. Call Gemma with AQI context (on failure → 502, nothing is saved).
+      7. Save user message + AI reply.
+      8. Update session (auto-title + timestamp).
     """
     if request.method != "POST":
         return JsonResponse({"status": "error", "error": "Method not allowed"}, status=405)
+
+    uid = _auth_uid(request)
+    if not uid:
+        return _unauthorized()
 
     try:
         body = _parse_body(request)
@@ -402,28 +565,41 @@ def send_message(request, chat_id: str):
     if not user_text:
         return JsonResponse({"status": "error", "error": "message is required"}, status=400)
 
-    # ── 1. Validate session ────────────────────────────────────────────────
+    # ── 1. Validate session + ownership ────────────────────────────────────
     try:
-        session = _get_session(chat_id)
+        session = _get_owned_session(chat_id, uid)
     except LookupError as e:
         return JsonResponse({"status": "error", "error": str(e)}, status=404)
+    except PermissionError as e:
+        return JsonResponse({"status": "error", "error": str(e)}, status=403)
+
+    # ── 1b. Daily token quota ──────────────────────────────────────────────
+    used_today = _tokens_used_today(uid)
+    if used_today >= DAILY_TOKEN_LIMIT:
+        return JsonResponse(
+            {
+                "status": "error",
+                "error":  "Daily AI usage limit reached. Try again tomorrow.",
+                "tokens_used_today": used_today,
+                "daily_limit":       DAILY_TOKEN_LIMIT,
+            },
+            status=429,
+        )
 
     # ── 2. Load user profile ───────────────────────────────────────────────
     profile = _get_user_profile(session.user_uid)
     city    = (profile or {}).get("location", "Dushanbe")
 
-    # ── 3. Fetch real AQI data for user's city ─────────────────────────────
-    # Runs in background while we do other work
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        aqi_future = executor.submit(_fetch_aqi_data, city)
+    # ── 3. Fetch real AQI data in background while we do other work ────────
+    aqi_future = _EXECUTOR.submit(_fetch_aqi_data, city)
 
-        # ── 4. Build system prompt ─────────────────────────────────────────
-        system_prompt = _build_system_prompt(profile)
+    # ── 4. Build system prompt ─────────────────────────────────────────────
+    system_prompt = _build_system_prompt(profile)
 
-        # ── 5. Load history ────────────────────────────────────────────────
-        history = _load_history(chat_id)
+    # ── 5. Load last N messages of history ─────────────────────────────────
+    history = _load_history(chat_id, limit=HISTORY_LIMIT)
 
-        aqi_data = aqi_future.result()  # wait for AQI
+    aqi_data = aqi_future.result()  # wait for AQI
 
     logger.info(
         f"send_message: AQI for '{city}' → "
@@ -431,10 +607,7 @@ def send_message(request, chat_id: str):
         f"(source: {aqi_data.get('source', '?') if aqi_data else 'none'})"
     )
 
-    # ── 6. Save user message ───────────────────────────────────────────────
-    user_msg_dict = _save_message(chat_id, session.user_uid, "user", user_text)
-
-    # ── 7. Build Gemma payload ─────────────────────────────────────────────
+    # ── 6. Call Gemma ──────────────────────────────────────────────────────
     # AQI context appended to the LAST user message (invisible to the user in UI)
     aqi_context   = _build_aqi_context(aqi_data)
     user_text_ctx = user_text + aqi_context
@@ -445,12 +618,19 @@ def send_message(request, chat_id: str):
         contents.append({"role": api_role, "parts": [{"text": msg["content"]}]})
     contents.append({"role": "user", "parts": [{"text": user_text_ctx}]})
 
-    ai_text = _call_gemma(contents, system_prompt)
+    try:
+        ai_text, output_tokens = _call_gemma(contents, system_prompt)
+    except GemmaError as e:
+        # Ничего не сохраняем: клиент может безопасно повторить запрос
+        return JsonResponse({"status": "error", "error": str(e)}, status=502)
 
-    # ── 8. Save AI reply ───────────────────────────────────────────────────
-    ai_msg_dict = _save_message(chat_id, session.user_uid, "assistant", ai_text)
+    _add_token_usage(uid, output_tokens)
 
-    # ── 9. Auto-title + update session timestamp ───────────────────────────
+    # ── 7. Save user message + AI reply ────────────────────────────────────
+    user_msg_dict = _save_message(chat_id, session.user_uid, "user", user_text)
+    ai_msg_dict   = _save_message(chat_id, session.user_uid, "assistant", ai_text)
+
+    # ── 8. Auto-title + update session timestamp ───────────────────────────
     if session.title == "New Chat" and not history:
         session.title = user_text[:60] + ("…" if len(user_text) > 60 else "")
     session.updated_at = timezone.now()
@@ -478,7 +658,12 @@ def send_message(request, chat_id: str):
 #  AI INTEGRATION
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _call_gemma(contents: list, system_prompt: str) -> str:
+class GemmaError(Exception):
+    """Gemma недоступна или вернула непригодный ответ."""
+
+
+def _call_gemma(contents: list, system_prompt: str) -> tuple[str, int]:
+    """Возвращает (текст ответа, потрачено выходных токенов)."""
     url = (
         f"https://generativelanguage.googleapis.com/v1beta"
         f"/models/{settings.GEMMA4_MODEL}:generateContent"
@@ -491,7 +676,7 @@ def _call_gemma(contents: list, system_prompt: str) -> str:
 
     payload = {
         "contents": enriched_contents,
-        "generationConfig": {"maxOutputTokens": 500, "temperature": 0.7},
+        "generationConfig": {"maxOutputTokens": MAX_OUTPUT_TOKENS, "temperature": 0.7},
     }
 
     def _extract_text(resp_json: dict) -> str:
@@ -503,7 +688,7 @@ def _call_gemma(contents: list, system_prompt: str) -> str:
                 if not p.get("thought", False) and p.get("text", "").strip()
             )
             if not full_text:
-                return "Sorry, could not get a response."
+                raise GemmaError("AI returned an empty response. Please try again.")
             clean_lines = [
                 line for line in full_text.splitlines()
                 if line.strip() and not line.strip().startswith(("*", "-", "•", "#"))
@@ -511,7 +696,7 @@ def _call_gemma(contents: list, system_prompt: str) -> str:
             return "\n".join(clean_lines) if clean_lines else full_text.strip()
         except (KeyError, IndexError):
             logger.error(f"_call_gemma: unexpected format: {resp_json}")
-            return "Sorry, could not get a response."
+            raise GemmaError("AI returned an unexpected response. Please try again.")
 
     try:
         response = requests.post(
@@ -521,10 +706,21 @@ def _call_gemma(contents: list, system_prompt: str) -> str:
             timeout=(10, 60),
         )
         response.raise_for_status()
-        return _extract_text(response.json())
+        resp_json = response.json()
+        text      = _extract_text(resp_json)
+
+        # Выходные токены: сгенерированный текст + внутреннее размышление модели
+        usage         = resp_json.get("usageMetadata", {})
+        output_tokens = (
+            usage.get("candidatesTokenCount", 0) + usage.get("thoughtsTokenCount", 0)
+        ) or max(1, len(text) // 3)  # грубая оценка, если API не вернул usage
+
+        return text, output_tokens
+    except GemmaError:
+        raise
     except requests.exceptions.Timeout:
         logger.error("_call_gemma: timeout")
-        return "Sorry, the request timed out. Please try again."
+        raise GemmaError("The AI request timed out. Please try again.")
     except Exception as e:
         logger.error(f"_call_gemma failed ({type(e).__name__}): {e}")
-        return "Sorry, could not process the request. Please try again."
+        raise GemmaError("AI service is temporarily unavailable. Please try again.")

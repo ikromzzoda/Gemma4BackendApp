@@ -2,6 +2,15 @@ from django.urls import path
 from . import views
 
 urlpatterns = [
+    # GET    /api/chat/docs/                         → API documentation page
+    path("chat/docs/", views.api_docs, name="chat_api_docs"),
+
+    # GET    /api/chat/swagger/                      → Swagger UI (интерактивная документация)
+    path("chat/swagger/", views.swagger_ui, name="chat_swagger_ui"),
+
+    # GET    /api/chat/openapi.json                  → OpenAPI 3.0 spec
+    path("chat/openapi.json", views.openapi_spec, name="chat_openapi_spec"),
+
     # ── Session management ────────────────────────────────────────────────────
     # POST   /api/chat/sessions/                      → create new chat session
     path("chat/sessions/", views.create_session, name="chat_create_session"),
@@ -19,6 +28,6 @@ urlpatterns = [
     # GET    /api/chat/sessions/<chat_id>/messages/   → fetch full chat history
     path("chat/sessions/<str:chat_id>/messages/", views.get_messages, name="chat_get_messages"),
 
-    # POST   /api/chat/sessions/<chat_id>/messages/   → send message, get AI reply
+    # POST   /api/chat/sessions/<chat_id>/send/       → send message, get AI reply
     path("chat/sessions/<str:chat_id>/send/", views.send_message, name="chat_send_message"),
 ]
