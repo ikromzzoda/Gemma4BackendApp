@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(python manage.py check 2>&1 | Out-String)",
+      "PowerShell(python manage.py runserver 8000 --noreload)",
+      "Bash(curl -s -o - -w \"\\\\nHTTP %{http_code}\\\\n\" -X POST http://127.0.0.1:8000/api/chat/sessions/ -H \"Content-Type: application/json\" -d '{\"title\":\"test\"}')",
+      "Bash(curl -s -o - -w \"\\\\nHTTP %{http_code}\\\\n\" -X POST http://127.0.0.1:8000/api/chat/sessions/ -H \"Authorization: Bearer garbage\" -H \"Content-Type: application/json\" -d '{\"title\":\"test\"}')",
+      "Bash(curl -s -o - -w \"\\\\nHTTP %{http_code}\\\\n\" http://127.0.0.1:8000/api/chat/sessions/)",
+      "Bash(curl -s -o /dev/null -w \"docs page: HTTP %{http_code}\\\\n\" http://127.0.0.1:8000/api/chat/docs/)",
+      "Bash(curl -s -o /dev/null -w \"messages no token: HTTP %{http_code}\\\\n\" http://127.0.0.1:8000/api/chat/sessions/abc/messages/)",
+      "PowerShell(Get-NetTCPConnection *)",
+      "PowerShell(python manage.py runserver 8001 --noreload)",
+      "Bash(curl -s -o /dev/null -w \"swagger page: HTTP %{http_code}\\\\n\" http://127.0.0.1:8001/api/chat/swagger/)",
+      "Bash(curl -s http://127.0.0.1:8001/api/chat/openapi.json)",
+      "Bash(python -c \"import json,sys; s=json.load\\(sys.stdin\\); print\\('openapi.json: valid JSON, openapi', s['openapi'], '|', len\\(s['paths']\\), 'paths:', ', '.join\\(s['paths']\\)\\)\")",
+      "Bash(curl -s http://127.0.0.1:8001/api/chat/swagger/)",
+      "PowerShell(python \"C:\\\\Users\\\\AI\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-AI-Desktop-Gemma-4-gemma4\\\\cf6ccd27-4366-44f6-bab1-64467172b079\\\\scratchpad\\\\smoke_chat.py\")",
+      "PowerShell($env:PYTHONIOENCODING = \"utf-8\"; python \"C:\\\\Users\\\\AI\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-AI-Desktop-Gemma-4-gemma4\\\\cf6ccd27-4366-44f6-bab1-64467172b079\\\\scratchpad\\\\smoke_chat.py\")",
+      "Bash(python -c \"from chat.openapi import OPENAPI_SPEC; import json; json.dumps\\(OPENAPI_SPEC\\); print\\('openapi.py OK,', len\\(OPENAPI_SPEC['paths']\\), 'paths'\\)\")",
+      "Bash(python -c ' *)",
+      "PowerShell($env:PYTHONIOENCODING = \"utf-8\"; python \"C:\\\\Users\\\\AI\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-AI-Desktop-Gemma-4-gemma4\\\\cf6ccd27-4366-44f6-bab1-64467172b079\\\\scratchpad\\\\ask_walk.py\")"
+    ]
+  }
+}

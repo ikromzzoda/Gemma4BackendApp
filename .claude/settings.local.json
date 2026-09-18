@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git rm *)",
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\AI\\\\Desktop\\\\Gemma 4\" -Directory | Where-Object { $_.Name -ne \".env\" })"
+    ]
+  }
+}

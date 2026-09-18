@@ -314,37 +314,22 @@ def get_forecast_data(request):
     now_utc = datetime.now(tz=dt_tz.utc)
     current_hour = now_utc.strftime("%Y-%m-%d %H:00")
 
-    def aqi_label_us(aqi):
-        if aqi is None:
-            return "Unknown"
-        if aqi <= 50:
-            return "Good"
-        elif aqi < 100:
-            return "Moderate"
-        elif aqi < 150:
-            return "Unhealthy for Sensitive Groups"
-        elif aqi < 200:
-            return "Unhealthy"
-        elif aqi < 250:
-            return "Very Unhealthy"
-        else:
-            return "Hazardous"
+    # def aqi_label_us(aqi):
+    #     if aqi is None:
+    #         return "Unknown"
+    #     if aqi <= 50:
+    #         return "Good"
+    #     elif aqi < 100:
+    #         return "Moderate"
+    #     elif aqi < 150:
+    #         return "Unhealthy for Sensitive Groups"
+    #     elif aqi < 200:
+    #         return "Unhealthy"
+    #     elif aqi < 250:
+    #         return "Very Unhealthy"
+    #     else:
+    #         return "Hazardous"
 
-    def aqi_from_pm25(pm25):
-        if pm25 is None:
-            return None
-        if pm25 <= 12.0:
-            return round((pm25 * 50 / 12.0) * 3)
-        elif pm25 <= 35.4:
-            return round((50 + (pm25 - 12.1) * 49 / 23.3) * 3)
-        elif pm25 <= 55.4:
-            return round((100 + (pm25 - 35.5) * 49 / 19.9) * 3)
-        elif pm25 <= 150.4:
-            return round((150 + (pm25 - 55.5) * 49 / 94.9) * 3)
-        elif pm25 <= 250.4:
-            return round((200 + (pm25 - 150.5) * 99 / 99.9) * 3)
-        else:
-            return round((300 + (pm25 - 250.5) * 99 / 99.9) * 3)
 
     def fetch_current_aqi():
         return get_aqi_by_coords(lat, lon)
@@ -358,7 +343,7 @@ def get_forecast_data(request):
     with ThreadPoolExecutor(max_workers=2) as executor:
         aqi_future = executor.submit(fetch_current_aqi)
         owm_future = executor.submit(fetch_owm_forecast)
-        current_aqi = aqi_future.result()
+        # current_aqi = aqi_future.result()
         owm_resp = owm_future.result()
 
     try:
@@ -383,12 +368,12 @@ def get_forecast_data(request):
                 avg_pm25 = round(sum(pm25_vals) / len(pm25_vals), 2)
                 avg_pm10 = round(sum(pm10_vals) / len(pm10_vals), 2)
 
-                aqi_value = current_aqi if date == today_date else aqi_from_pm25(avg_pm25)
+                aqi_value = get_aqi_by_coords(lat, lon)
 
                 forecast_points.append({
                     "date": str(date),
                     "aqi": aqi_value,
-                    "aqi_label": aqi_label_us(aqi_value),
+                    "aqi_label": _aqi_label_us(aqi_value),
                     "pm25": avg_pm25,
                     "pm10": avg_pm10,
                 })
@@ -407,12 +392,12 @@ def get_forecast_data(request):
                 pm25 = components.get("pm2_5")
                 item_hour = dt.strftime("%Y-%m-%d %H:00")
 
-                aqi_value = current_aqi if item_hour == current_hour else aqi_from_pm25(pm25)
+                aqi_value = get_aqi_by_coords(lat, lon)
 
                 forecast_points.append({
                     "time": dt.strftime("%Y-%m-%d %H:%M"),
                     "aqi": aqi_value,
-                    "aqi_label": aqi_label_us(aqi_value),
+                    "aqi_label": _aqi_label_us(aqi_value),
                     "pm25": pm25,
                     "pm10": components.get("pm10"),
                 })
@@ -426,7 +411,7 @@ def get_forecast_data(request):
                 "city": city,
                 "period": period,
                 "max_aqi": max_aqi,
-                "max_aqi_label": aqi_label_us(max_aqi),
+                "max_aqi_label": _aqi_label_us(max_aqi),
                 "max_pm25": max_pm25,
                 "forecast_points": forecast_points,
             },
