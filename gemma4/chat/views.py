@@ -257,26 +257,52 @@ def _get_user_profile(user_uid: str) -> dict | None:
         return None
 
 
-def _build_system_prompt(profile: dict | None) -> str:
-    if not profile:
-        return SYSTEM_PROMPT
+def _build_system_prompt(profile: dict | None, air_quality: dict | None = None) -> str:
+    profile = profile or {}
+    air_quality = air_quality or {}
 
     user_context = f"""
-        Current user profile:
-        - Name: {profile.get("firstName", "")} {profile.get("surname", "")}
-        - Age group: {profile.get("ageGroup", "Unknown")}
-        - Location: {profile.get("location", "Unknown")}
-        - Activity level: {profile.get("activityLevel", "Unknown")}
-        - Health conditions: {profile.get("healthCondition", "") or "None"}
+Current user profile:
+- Name: {profile.get("firstName", "")} {profile.get("surname", "")}
+- Age group: {profile.get("ageGroup", "Unknown")}
+- Location: {profile.get("location", "Unknown")}
+- Activity level: {profile.get("activityLevel", "Unknown")}
+- Health conditions: {profile.get("healthCondition", "") or "None"}
 
-        Personalization rules:
-        - Address the user by first name when natural.
-        - Use their location as default city for AQI/weather queries.
-        - Consider health conditions in every health-related answer.
-        - Tailor activity recommendations to their activity level.
-        - ALWAYS reply in the exact language used by the user in their prompt.
-        - When real-time AQI data is provided in the message, use those exact numbers.
-          Never invent or approximate AQI values.
+Current air quality data:
+- city: {air_quality.get("city", "Unavailable")}
+- aqi: {air_quality.get("aqi", "Unavailable")}
+- aqi_label: {air_quality.get("aqi_label", "Unavailable")}
+- pm25: {air_quality.get("pm25", "Unavailable")}
+- pm10: {air_quality.get("pm10", "Unavailable")}
+- no2: {air_quality.get("no2", "Unavailable")}
+- o3: {air_quality.get("o3", "Unavailable")}
+- so2: {air_quality.get("so2", "Unavailable")}
+- co: {air_quality.get("co", "Unavailable")}
+
+Personalization and response rules:
+1. Address the user by their first name when it feels natural.
+2. Use the user's location as the default city for air-quality and weather questions when no city is explicitly specified.
+3. Consider the user's age group, activity level, and health conditions when providing health-related or outdoor-activity advice.
+4. ALWAYS reply in exactly the same language as the user's prompt.
+5. When current air-quality data is provided above, treat it as the authoritative source for this conversation.
+6. NEVER invent, estimate, round, modify, or replace air-quality values.
+7. If the user asks for current air-quality data, air-quality details, AQI information, or asks to "send/show/give me the air quality data", provide the available data from the Current air quality data section.
+8. When the user explicitly asks to send the air-quality data, include these fields whenever they have a value:
+   - city
+   - aqi
+   - aqi_label
+   - pm25
+   - pm10
+   - no2
+   - o3
+   - so2
+   - co
+9. Preserve the exact numeric values received from the air-quality data. Do not calculate or infer missing values.
+10. If a field is missing or unavailable, clearly mark it as "Unavailable" instead of inventing a value.
+11. If the user asks only for advice (for example, whether it is safe to exercise outside), do not unnecessarily list all air-quality fields. Use the available AQI data to provide concise, practical advice.
+12. If the user asks for both advice and the raw air-quality data, provide both: first the relevant advice, then the exact air-quality data.
+13. Distinguish between factual air-quality data and personalized recommendations. Never present a recommendation as if it were a measured air-quality value.
     """.strip()
 
     return SYSTEM_PROMPT + "\n\n" + user_context
@@ -594,12 +620,13 @@ def send_message(request, chat_id: str):
     aqi_future = _EXECUTOR.submit(_fetch_aqi_data, city)
 
     # ── 4. Build system prompt ─────────────────────────────────────────────
-    system_prompt = _build_system_prompt(profile)
+    aqi_data = None
 
     # ── 5. Load last N messages of history ─────────────────────────────────
     history = _load_history(chat_id, limit=HISTORY_LIMIT)
 
     aqi_data = aqi_future.result()  # wait for AQI
+    system_prompt = _build_system_prompt(profile, aqi_data)
 
     logger.info(
         f"send_message: AQI for '{city}' → "

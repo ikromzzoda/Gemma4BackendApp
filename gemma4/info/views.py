@@ -116,11 +116,9 @@ def fetch_and_save_air_pollution(lat=None, lon=None):
             'pm25': components.get('pm2_5'),
             'pm10': components.get('pm10'),
             'no2': components.get('no2'),
-            # 'no': components.get('no'),
             'o3': components.get('o3'),
             'so2': components.get('so2'),
             'co': components.get('co'),
-            # 'nh3': components.get('nh3'),
             'aqi': get_aqi_by_coords(lat, lon),
             'dt': timezone.make_aware(datetime.fromtimestamp(poll_data.get('dt', 0))),
         }
@@ -141,9 +139,9 @@ def fetch_and_save_air_pollution(lat=None, lon=None):
             air_pollution = AirPollution(
                 lat=api_data['lat'], lon=api_data['lon'],
                 pm25=api_data['pm25'], pm10=api_data['pm10'],
-                no2=api_data['no2'], no=api_data['no'],
+                no2=api_data['no2'],
                 o3=api_data['o3'], so2=api_data['so2'],
-                co=api_data['co'], nh3=api_data['nh3'],
+                co=api_data['co'],
                 aqi=api_data['aqi'], dt=api_data['dt'],
             )
             air_pollution.save()
@@ -184,11 +182,9 @@ def get_all_air_pollution(request):
                     'lat': record.lat, 'lon': record.lon,
                     'pm25': record.pm25, 'pm10': record.pm10,   
                     'no2': record.no2, 
-                    # 'no': record.no,
                     'o3': record.o3, 'so2': record.so2,
-                    'co': record.co, 
-                    # 'nh3': record.nh3,
-                    'aqi': record.api, #_aqi_level(record.aqi),
+                    'co': record.co,
+                    'aqi': record.aqi,
                     'dt': str(record.dt),
                     'created_at': str(record.created_at),
                 })
@@ -343,7 +339,7 @@ def get_forecast_data(request):
     with ThreadPoolExecutor(max_workers=2) as executor:
         aqi_future = executor.submit(fetch_current_aqi)
         owm_future = executor.submit(fetch_owm_forecast)
-        # current_aqi = aqi_future.result()
+        current_aqi = aqi_future.result()
         owm_resp = owm_future.result()
 
     try:
@@ -421,57 +417,70 @@ def get_forecast_data(request):
         return JsonResponse({"status": "error", "error": "Internal server error", "detail": str(e)}, status=500)
 
 
+def _normalize_optional_param(value, valid_values=None, default=None):
+    if value is None:
+        return default
+
+    value = str(value).strip()
+    if not value:
+        return default
+
+    if valid_values is not None:
+        allowed = {item.strip() for item in str(valid_values).split('|') if item.strip()}
+        if value not in allowed:
+            return default
+
+    return value
+
+
 def get_ai_advice(request):
     if request.method != 'GET':
         return JsonResponse({"status": "error", "error": "Method not allowed"}, status=405)
 
-    city = request.GET.get("city", "Dushanbe")
-    health_condition = request.GET.get("health_condition", "None")
-    activity_level = request.GET.get("activity_level", "Active")
+    city = _normalize_optional_param(request.GET.get("city"), default="Dushanbe")
+    health_condition = request.GET.get("health_condition") or "Not specified"
+    activity_level = request.GET.get("activity_level") or "General"
 
-    coords, err = _validate_city(city)
-    if err:
-        return err
-
-    valid_hc = ["Asthma", "Allergies", "Bronchitis", "COPD", "Heart Condition", "None", "Others"]
-    valid_al = ["Sedentary", "Lightly Active", "Active", "Very Active"]
-
-    if health_condition not in valid_hc:
-        return JsonResponse({"status": "error", "error": "Invalid health_condition", "valid_values": valid_hc}, status=400)
-    if activity_level not in valid_al:
-        return JsonResponse({"status": "error", "error": "Invalid activity_level", "valid_values": valid_al}, status=400)
+    coords = TAJIK_CITIES.get(city)
+    if coords is None:
+        city = "Dushanbe"
+        coords = TAJIK_CITIES[city]
 
     lat, lon = coords["lat"], coords["lon"]
 
-    # Шаг 1: параллельно получаем OWM и AQI
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        owm_future = executor.submit(lambda: requests.get(
-            f"http://api.openweathermap.org/data/2.5/air_pollution?lat={lat}&lon={lon}&appid={OPENWEATHERMAP_API_KEY}",
-            timeout=10,
-        ))
-        aqi_future = executor.submit(get_aqi_by_coords, lat, lon)
-
-        try:
-            owm_resp = owm_future.result()
-            owm_resp.raise_for_status()
-        except requests.exceptions.RequestException:
-            return JsonResponse({"status": "error", "error": "OpenWeatherMap API unavailable"}, status=503)
-
-        aqi = aqi_future.result()
-
     try:
-        aqi_label = _aqi_label_us(aqi)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            owm_future = executor.submit(lambda: requests.get(
+                f"http://api.openweathermap.org/data/2.5/air_pollution?lat={lat}&lon={lon}&appid={OPENWEATHERMAP_API_KEY}",
+                timeout=10,
+            ))
+            aqi_future = executor.submit(get_aqi_by_coords, lat, lon)
 
-        # Шаг 2: сразу запускаем Gemini не дожидаясь ничего лишнего
+            owm_resp = None
+            aqi = None
+            try:
+                owm_resp = owm_future.result()
+                owm_resp.raise_for_status()
+            except requests.exceptions.RequestException:
+                owm_resp = None
+
+            try:
+                aqi = aqi_future.result()
+            except Exception:
+                aqi = None
+
+        aqi_value = aqi if aqi is not None else 0
+        aqi_label = _aqi_label_us(aqi_value)
+
         with ThreadPoolExecutor(max_workers=1) as executor:
-            advice_future = executor.submit(generate_advice, aqi, health_condition, activity_level)
+            advice_future = executor.submit(generate_advice, aqi_value, health_condition, activity_level)
             advice = advice_future.result()
 
         return JsonResponse({
             "status": "success",
             "data": {
                 "city": city,
-                "aqi": aqi,
+                "aqi": aqi_value,
                 "aqi_label": aqi_label,
                 "health_condition": health_condition,
                 "activity_level": activity_level,
@@ -483,25 +492,41 @@ def get_ai_advice(request):
 
 
 def generate_advice(aqi, health_condition, activity_level):
+    health_condition = health_condition or "Not specified"
+    activity_level = activity_level or "General"
+
+    api_key = (getattr(settings, "GEMMA4_API_KEY", "") or os.getenv("GEMMA4_API_KEY", "") or "").strip()
+    if not api_key:
+        logger.error("generate_advice: GEMMA4_API_KEY is missing or empty")
+        return [
+            f"Air quality is currently {_aqi_label_us(aqi)}. Reduce outdoor exertion and keep a mask or inhaler nearby.",
+            f"If you have {health_condition}, avoid intense activity and monitor symptoms closely.",
+            f"Keep windows closed and check AQI updates before outdoor exercise."
+        ]
+
     prompt = (
-        f"You are an air quality health advisor.\n"
-        f"AQI: {aqi} ({_aqi_label_us(aqi)})\n"
+        f"You are a concise air quality health advisor for a city in Tajikistan.\n"
+        f"AQI value: {aqi}\n"
+        f"AQI label: {_aqi_label_us(aqi)}\n"
         f"Health condition: {health_condition}\n"
         f"Activity level: {activity_level}\n\n"
-        f"Return ONLY this JSON, nothing else:\n"
-        f'{{"advice": ["tip 1", "tip 2", "tip 3"]}}\n'
-        f"Each tip: 1 short sentence. Max 3 tips."
+        f"Give 2 to short practical tips in English.\n"
+        f"Each tip must be 1 sentence, clear, specific, and tailored to the AQI and the person's condition.\n"
+        f"No markdown, no code blocks, no explanations, no extra text.\n"
+        f"Return only valid JSON in this exact format:\n"
+        f'{{"advice": ["short tip 1", "short tip 2", "short tip 3"]}}\n'
+        f"Keep the advice useful for outdoor activity and health safety."
     )
 
     raw = ""
     try:
         response = requests.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/{settings.GEMMA4_MODEL}:generateContent",
-            params={"key": settings.GEMMA4_API_KEY},
+            params={"key": api_key},
             json={
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {
-                    "maxOutputTokens": 250,
+                    "maxOutputTokens": 400,
                     "temperature": 0.2,
                 }
             },
@@ -521,12 +546,18 @@ def generate_advice(aqi, health_condition, activity_level):
 
     except requests.exceptions.ReadTimeout:
         logger.error("generate_advice: TIMEOUT")
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"generate_advice: HTTPError: {e}")
     except ValueError as e:
         logger.error(f"generate_advice: {e} | raw={raw[:200]!r}")
     except Exception as e:
         logger.error(f"generate_advice: {type(e).__name__}: {e}")
 
-    return [f"Air quality is {_aqi_label_us(aqi)}. Check local guidelines for your health condition."]
+    return [
+        f"Air quality is currently {_aqi_label_us(aqi)}. Reduce outdoor exertion and keep a mask or inhaler nearby.",
+        f"If you have {health_condition}, avoid intense activity and monitor symptoms closely.",
+        f"Keep windows closed and check AQI updates before outdoor exercise."
+    ]
 
 
 import logging

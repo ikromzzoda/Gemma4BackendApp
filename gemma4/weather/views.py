@@ -63,10 +63,10 @@ def get_home_data(request):
             AirPollution(
                 lat=lat, lon=lon,
                 pm25=components.get("pm2_5"), pm10=components.get("pm10"),
-                no2=components.get("no2"), no=components.get("no"),
+                no2=components.get("no2"),
                 o3=components.get("o3"), so2=components.get("so2"),
-                co=components.get("co"), nh3=components.get("nh3"),
-                aqi=get_aqi_by_coords(lat, lon), #_aqi_level(aqi),
+                co=components.get("co"),
+                aqi=get_aqi_by_coords(lat, lon),
                 dt=timezone.make_aware(datetime.fromtimestamp(poll_item.get("dt", 0))),
             ).save()
             saved_pollution = True

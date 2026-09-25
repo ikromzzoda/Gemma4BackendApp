@@ -10,11 +10,11 @@ class AirPollution(models.Model):
     pm25 = models.NumberField(required=False)  # PM2.5
     pm10 = models.NumberField(required=False)  # PM10
     no2 = models.NumberField(required=False)   # Nitrogen Dioxide
-    no = models.NumberField(required=False)    # Nitrogen Monoxide
+    # no = models.NumberField(required=False)    # Nitrogen Monoxide
     o3 = models.NumberField(required=False)    # Ozone
     so2 = models.NumberField(required=False)   # Sulfur Dioxide
     co = models.NumberField(required=False)    # Carbon Monoxide
-    nh3 = models.NumberField(required=False)   # Ammonia
+    # nh3 = models.NumberField(required=False)   # Ammonia
 
     # AQI (Air Quality Index, OpenWeatherMap scale 1-5)
     aqi = models.NumberField(required=False)

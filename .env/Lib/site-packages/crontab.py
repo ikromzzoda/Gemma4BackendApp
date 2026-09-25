@@ -88,6 +88,7 @@ import shlex
 
 import types
 import codecs
+import asyncio
 import logging
 import tempfile
 import platform
@@ -100,7 +101,7 @@ from collections import OrderedDict
 from shutil import which
 
 __pkgname__ = 'python-crontab'
-__version__ = '3.3.0'
+__version__ = '3.4.0'
 
 ITEMREX = re.compile(r'^\s*([^@#\s]+)\s+([^@#\s]+)\s+([^@#\s]+)\s+([^@#\s]+)'
                      r'\s+([^@#\s]+)\s+([^\n]*?)(\s+#\s*([^\n]*)|$)')
@@ -432,6 +433,19 @@ class CronTab:
                 yield value
 
             sleep(cadence)
+            count += 1
+
+    async def run_scheduler_async(self, timeout=-1, cadence=60, warp=False):
+        """Run the CronTab as an internal scheduler (generator)"""
+        count = 0
+        while count != timeout:
+            now = datetime.now()
+            if warp:
+                now += timedelta(seconds=count * 60)
+            for value in self.run_pending(now=now):
+                yield value
+
+            await asyncio.sleep(cadence)
             count += 1
 
     def render(self, errors=False):
@@ -1227,12 +1241,13 @@ class CronSlice:
     def parse(self, value):
         """Set values into the slice."""
         self.clear()
+        import sys
         if value is not None:
             for part in str(value).split(','):
-                if part.find("/") > 0 or part.find("-") > 0 or part == '*':
+                if part.find("/") > 0 or part.find("-") > 0 or "~" in part or part == '*':
                     self.parts += self.get_range(part)
-                    continue
-                self.parts.append(self.parse_value(part, sunday=0))
+                else:
+                    self.parts.append(self.parse_value(part, sunday=0))
 
     def render(self, resolve=False):
         """Return the slice rendered as a crontab.
@@ -1253,12 +1268,12 @@ class CronSlice:
     def __str__(self):
         return self.render()
 
-    def every(self, n_value, also=False):
+    def every(self, n_value, also=False, random=False):
         """Set the every X units value"""
         n_value = self.test_value(n_value)
         if not also:
             self.clear()
-        self.parts += self.get_range(int(n_value))
+        self.parts += self.get_range(int(n_value), random=random)
         return self.parts[-1]
 
     def on(self, *n_value, **opts):
@@ -1269,12 +1284,16 @@ class CronSlice:
             self.parts += (self.parse_value(set_a, sunday=0),)
         return self.parts
 
-    def during(self, vfrom, vto, also=False):
+    def during(self, vfrom, vto, also=False, random=False):
         """Set the During value, which sets a range"""
         if not also:
             self.clear()
-        self.parts += self.get_range(str(vfrom) + '-' + str(vto))
+        self.parts += self.get_range(str(vfrom) + '-' + str(vto), random=random)
         return self.parts[-1]
+
+    def random_during(self, vfrom, vto):
+        """Set command to run at one random time"""
+        return self.during(vfrom, vto, random=True)
 
     @property
     def also(self):
@@ -1285,9 +1304,9 @@ class CronSlice:
         """clear the slice ready for new vaues"""
         self.parts = []
 
-    def get_range(self, *vrange):
+    def get_range(self, *vrange, random=False):
         """Return a cron range for this slice"""
-        ret = CronRange(self, *vrange)
+        ret = CronRange(self, *vrange, random=random)
         if ret.dangling is not None:
             return [ret.dangling, ret]
         return [ret]
@@ -1385,12 +1404,13 @@ def _render(value, resolve=False):
 
 class CronRange:
     """A range between one value and another for a time range."""
-    def __init__(self, vslice, *vrange):
+    def __init__(self, vslice, *vrange, random=False):
         # holds an extra dangling entry, for example sundays.
         self.dangling = None
         self.slice = vslice
         self.cron = None
         self.seq = 1
+        self.is_random_range = random
 
         if not vrange:
             self.all()
@@ -1414,6 +1434,9 @@ class CronRange:
                 value = "0-0"
             if self.seq < 1 or self.seq > self.slice.max:
                 raise ValueError("Sequence can not be divided by zero or max")
+        if value.count('~') == 1 and value.count('-') == 0 and len(value) > 1:
+            self.is_random_range = True
+            value = value.replace('~', '-')
         if value.count('-') == 1:
             vfrom, vto = value.split('-')
             self.vfrom = self.slice.parse_value(vfrom, sunday=0)
@@ -1427,8 +1450,9 @@ class CronRange:
                 self.vto = self.slice.parse_value(vto, sunday=6)
             if self.vto < self.vfrom:
                 raise ValueError(f"Bad range '{self.vfrom}-{self.vto}'")
-        elif value == '*':
+        elif value in '~*':
             self.all()
+            self.is_random_range = value == '~'
         else:
             raise ValueError(f'Unknown cron range value "{value}"')
 
@@ -1439,12 +1463,12 @@ class CronRange:
 
     def render(self, resolve=False):
         """Render the ranged value for a cronjob"""
-        value = '*'
+        value = '*~'[self.is_random_range]
         if int(self.vfrom) > self.slice.min or int(self.vto) < self.slice.max:
             if self.vfrom == self.vto:
                 value = str(self.vfrom)
             else:
-                value = _render_values([self.vfrom, self.vto], '-', resolve)
+                value = _render_values([self.vfrom, self.vto], "-~"[self.is_random_range], resolve)
         if self.seq != 1:
             value += f"/{self.seq:d}"
         if value != '*' and SYSTEMV:
