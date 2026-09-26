@@ -78,6 +78,23 @@ def _aqi_label_us(aqi):
         return "Very Unhealthy"
     else:
         return "Hazardous"
+
+
+
+def _owm_aqi_label(aqi):
+    if aqi is None:
+        return "Unknown"
+    if aqi == 1:
+        return "Good"
+    elif aqi == 2:
+        return "Moderate"
+    elif aqi == 3:
+        return "Unhealthy for Sensitive Groups"
+    elif aqi == 4:
+        return "Unhealthy"
+    elif aqi == 5:
+        return "Very Unhealthy"
+    return _aqi_label_us(aqi)
     
 
 def _validate_city(city):
@@ -310,22 +327,6 @@ def get_forecast_data(request):
     now_utc = datetime.now(tz=dt_tz.utc)
     current_hour = now_utc.strftime("%Y-%m-%d %H:00")
 
-    # def aqi_label_us(aqi):
-    #     if aqi is None:
-    #         return "Unknown"
-    #     if aqi <= 50:
-    #         return "Good"
-    #     elif aqi < 100:
-    #         return "Moderate"
-    #     elif aqi < 150:
-    #         return "Unhealthy for Sensitive Groups"
-    #     elif aqi < 200:
-    #         return "Unhealthy"
-    #     elif aqi < 250:
-    #         return "Very Unhealthy"
-    #     else:
-    #         return "Hazardous"
-
 
     def fetch_current_aqi():
         return get_aqi_by_coords(lat, lon)
@@ -449,73 +450,61 @@ def get_ai_advice(request):
     lat, lon = coords["lat"], coords["lon"]
 
     try:
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            owm_future = executor.submit(lambda: requests.get(
-                f"http://api.openweathermap.org/data/2.5/air_pollution?lat={lat}&lon={lon}&appid={OPENWEATHERMAP_API_KEY}",
-                timeout=10,
-            ))
-            aqi_future = executor.submit(get_aqi_by_coords, lat, lon)
+        owm_resp = requests.get(
+            f"http://api.openweathermap.org/data/2.5/air_pollution?lat={lat}&lon={lon}&appid={OPENWEATHERMAP_API_KEY}",
+            timeout=10,
+        )
+        owm_resp.raise_for_status()
 
-            owm_resp = None
-            aqi = None
-            try:
-                owm_resp = owm_future.result()
-                owm_resp.raise_for_status()
-            except requests.exceptions.RequestException:
-                owm_resp = None
+        owm_data = owm_resp.json()
+        owm_item = (owm_data.get("list") or [{}])[0]
+        aqi_value = owm_item.get("main", {}).get("aqi")
+        aqi_label = _owm_aqi_label(aqi_value)
 
-            try:
-                aqi = aqi_future.result()
-            except Exception:
-                aqi = None
-
-        aqi_value = aqi if aqi is not None else 0
-        aqi_label = _aqi_label_us(aqi_value)
-
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            advice_future = executor.submit(generate_advice, aqi_value, health_condition, activity_level)
-            advice = advice_future.result()
+        advice = generate_advice(aqi_label=aqi_label, health_condition=health_condition, activity_level=activity_level)
 
         return JsonResponse({
             "status": "success",
             "data": {
                 "city": city,
-                "aqi": aqi_value,
                 "aqi_label": aqi_label,
                 "health_condition": health_condition,
                 "activity_level": activity_level,
                 "advice": advice,
             },
         })
+    except requests.exceptions.RequestException as e:
+        logger.error(f"get_ai_advice: OpenWeather request failed: {e}")
+        return JsonResponse({
+            "status": "error",
+            "error": "OpenWeather API unavailable",
+            "detail": str(e),
+        }, status=503)
     except Exception as e:
         return JsonResponse({"status": "error", "error": "Internal server error", "detail": str(e)}, status=500)
 
 
-def generate_advice(aqi, health_condition, activity_level):
+def generate_advice(aqi=None, health_condition=None, activity_level=None, aqi_label=None):
     health_condition = health_condition or "Not specified"
     activity_level = activity_level or "General"
+    aqi_label = aqi_label or "Unknown"
 
     api_key = (getattr(settings, "GEMMA4_API_KEY", "") or os.getenv("GEMMA4_API_KEY", "") or "").strip()
     if not api_key:
         logger.error("generate_advice: GEMMA4_API_KEY is missing or empty")
-        return [
-            f"Air quality is currently {_aqi_label_us(aqi)}. Reduce outdoor exertion and keep a mask or inhaler nearby.",
-            f"If you have {health_condition}, avoid intense activity and monitor symptoms closely.",
-            f"Keep windows closed and check AQI updates before outdoor exercise."
-        ]
+        return []
 
     prompt = (
-        f"You are a concise air quality health advisor for a city in Tajikistan.\n"
-        f"AQI value: {aqi}\n"
-        f"AQI label: {_aqi_label_us(aqi)}\n"
+        "You are a concise air quality health advisor for a city in Tajikistan.\n"
+        f"Air quality level: {aqi_label}\n"
         f"Health condition: {health_condition}\n"
         f"Activity level: {activity_level}\n\n"
-        f"Give 2 to short practical tips in English.\n"
-        f"Each tip must be 1 sentence, clear, specific, and tailored to the AQI and the person's condition.\n"
-        f"No markdown, no code blocks, no explanations, no extra text.\n"
-        f"Return only valid JSON in this exact format:\n"
-        f'{{"advice": ["short tip 1", "short tip 2", "short tip 3"]}}\n'
-        f"Keep the advice useful for outdoor activity and health safety."
+        "Give exactly 2 short advice sentences in English.\n"
+        "Each sentence must be one sentence, under 15 words, clear, practical, and tailored to the air quality level and condition.\n"
+        "Do not use placeholder words, labels, or example text like 'tip 1', 'tip 2', 'sentence 1', 'sentence 2', 'example', or 'placeholder'.\n"
+        "Output must be plain JSON only, with a top-level key named 'advice' and exactly two strings.\n"
+        "No markdown, no code fences, no bullets, no explanations, no extra text.\n"
+        "Return only this structure: {\"advice\": [\"short sentence 1\", \"short sentence 2\"]}."
     )
 
     raw = ""
@@ -528,9 +517,10 @@ def generate_advice(aqi, health_condition, activity_level):
                 "generationConfig": {
                     "maxOutputTokens": 400,
                     "temperature": 0.2,
+                    "responseMimeType": "application/json",
                 }
             },
-            timeout=(10, 60),
+            timeout=(20, 60),
         )
         response.raise_for_status()
 
@@ -540,9 +530,23 @@ def generate_advice(aqi, health_condition, activity_level):
         parsed = _extract_json(raw)
         tips = parsed.get("advice", [])
 
-        if isinstance(tips, list) and tips:
-            return [str(t) for t in tips[:3]]
-        return [str(tips)]
+        if isinstance(tips, list):
+            clean_tips = []
+            for item in tips[:2]:
+                text = str(item).strip()
+                lowered = text.lower()
+                blocked = (
+                    "tip 1" in lowered or "tip 2" in lowered or
+                    "sentence 1" in lowered or "sentence 2" in lowered or
+                    "example" in lowered or "placeholder" in lowered or
+                    "real advice" in lowered
+                )
+                if text and not blocked:
+                    clean_tips.append(text)
+            if clean_tips:
+                return clean_tips[:2]
+
+        return []
 
     except requests.exceptions.ReadTimeout:
         logger.error("generate_advice: TIMEOUT")
@@ -553,11 +557,7 @@ def generate_advice(aqi, health_condition, activity_level):
     except Exception as e:
         logger.error(f"generate_advice: {type(e).__name__}: {e}")
 
-    return [
-        f"Air quality is currently {_aqi_label_us(aqi)}. Reduce outdoor exertion and keep a mask or inhaler nearby.",
-        f"If you have {health_condition}, avoid intense activity and monitor symptoms closely.",
-        f"Keep windows closed and check AQI updates before outdoor exercise."
-    ]
+    return []
 
 
 import logging
@@ -567,24 +567,40 @@ import re
 
 def _extract_json(raw: str) -> dict:
     """Извлекает первый валидный JSON объект из текста любой длины."""
-    
+    if raw is None:
+        raise ValueError("No valid JSON found in response")
+
+    text = raw.strip()
+    if not text:
+        raise ValueError("No valid JSON found in response")
+
     # 1. Пробуем напрямую
     try:
-        return json.loads(raw)
+        return json.loads(text)
     except json.JSONDecodeError:
         pass
 
     # 2. Убираем ```json ... ``` обёртки
-    code_block = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
+    code_block = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if code_block:
         try:
             return json.loads(code_block.group(1))
         except json.JSONDecodeError:
             pass
 
-    # 3. Берём ПОСЛЕДНИЙ {...} в тексте (модель пишет JSON в конце)
-    matches = list(re.finditer(r"\{[^{}]*\}", raw, re.DOTALL))
-    for match in reversed(matches):  # с конца — там финальный JSON
+    # 3. Ищем JSON внутри текста, даже если перед ним есть markdown/bullets
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start:end + 1]
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+    # 4. Берём последний {...} в тексте
+    matches = list(re.finditer(r"\{[^{}]*\}", text, re.DOTALL))
+    for match in reversed(matches):
         try:
             return json.loads(match.group())
         except json.JSONDecodeError:
